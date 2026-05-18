@@ -1,0 +1,95 @@
+export type ViewId =
+  | "dashboard"
+  | "today"
+  | "upcoming"
+  | "projects"
+  | "calendar"
+  | "visualization"
+  | "assistant"
+  | "settings";
+
+export type TaskStatus = "active" | "completed";
+export type RepeatType = "daily" | "weekly" | "monthly" | "custom";
+export type RepeatUnit = "day" | "week" | "month";
+export type SortMode = "deadline" | "status";
+export type ThemeMode = "dark" | "light" | "system";
+export type AIProvider = "ollama" | "openai";
+export type Language = "en" | "ru";
+export type AIMode = "plan_day" | "create_tasks";
+
+export interface Subtask {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  color: string;
+  description: string;
+}
+
+export interface RepeatRule {
+  enabled: boolean;
+  type: RepeatType;
+  interval: number;
+  unit: RepeatUnit;
+  weekdays: number[];
+  excludedWeekdays: number[];
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  scheduledAt: string | null;
+  deadline?: string;
+  projectId: string;
+  durationMinutes: number | null;
+  repeat: RepeatRule;
+  nextRepeatAt: string | null;
+  recurringParentId?: string;
+  tags: string[];
+  subtasks: Subtask[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskDraft {
+  title: string;
+  description: string;
+  status: TaskStatus;
+  scheduledAt: string | null;
+  projectId: string;
+  durationMinutes: number | null;
+  repeat: RepeatRule;
+  nextRepeatAt: string | null;
+  tags: string[];
+  subtasks: Subtask[];
+}
+
+export interface AssistantMessage {
+  id: string;
+  role: "user" | "assistant" | "system" | "action" | "error";
+  content: string;
+  createdAt: string;
+  metadata?: {
+    actionType?: string;
+    errorCode?: string;
+    retryPrompt?: string;
+  };
+}
+
+export interface UserSettings {
+  theme: ThemeMode;
+  language: Language;
+  aiProvider: AIProvider;
+  aiBaseUrl: string;
+  localModel: string;
+  apiKey: string;
+  notifications: boolean;
+  startupBehavior: "dashboard" | "today" | "last-view";
+  autoPlanDay: boolean;
+}
