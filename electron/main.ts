@@ -49,7 +49,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  app.setAppUserModelId("com.todoai.desktop");
+  app.setAppUserModelId("com.kamartur.todoai");
   ipcMain.handle("app:get-theme", () => nativeTheme.shouldUseDarkColors ? "dark" : "light");
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:clear-cache", async () => {

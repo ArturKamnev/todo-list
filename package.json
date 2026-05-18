@@ -5,9 +5,11 @@
   "description": "Todo AI desktop productivity assistant",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron .\"",
-    "build": "tsc && vite build && tsc -p electron/tsconfig.json",
-    "dist": "npm run build && electron-builder",
+    "dev": "tsc -p electron/tsconfig.json && concurrently -k \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "tsc && vite build",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "dist": "npm run build && npm run build:electron && electron-builder --publish never",
+    "release": "npm run build && npm run build:electron && electron-builder --publish always",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "lint": "eslint ."
@@ -17,13 +19,15 @@
     "url": "https://github.com/ArturKamnev/todo-list.git"
   },
   "build": {
-    "appId": "com.todoai.desktop",
+    "appId": "com.kamartur.todoai",
     "productName": "Todo AI",
     "directories": {
       "output": "release"
     },
+    "artifactName": "${productName} Setup ${version}.${ext}",
     "files": [
       "dist/**/*",
+      "electron/**/*",
       "dist-electron/**/*",
       "package.json"
     ],
@@ -40,7 +44,10 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Todo AI"
     }
   },
   "dependencies": {
