@@ -17,6 +17,7 @@ import {
   RefreshCw,
   RotateCcw,
   Sun,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
@@ -31,14 +32,58 @@ interface SettingsPageProps {
 type SetupStatus = OllamaSetupStatus;
 type UpdateStatus = UpdateCheckResult;
 type PullState = "idle" | "loading" | "success" | "error";
+type ModelGroup = "fast" | "balanced" | "smart";
+type ConfirmAction = { type: "cache" } | { type: "history" } | { type: "delete-model"; modelName: string };
 
-const smartModels = [
-  { name: "llama3.1:latest", descriptionKey: "settings.smartModel.llama31" },
-  { name: "llama3.2:latest", descriptionKey: "settings.smartModel.llama32" },
-  { name: "mistral:latest", descriptionKey: "settings.smartModel.mistral" },
-  { name: "qwen2.5:latest", descriptionKey: "settings.smartModel.qwen" },
-  { name: "deepseek-r1:latest", descriptionKey: "settings.smartModel.deepseek" },
+const recommendedModelGroups: Array<{
+  id: ModelGroup;
+  titleKey: "settings.fastModels" | "settings.balancedModels" | "settings.smartModels";
+  descriptionKey: "settings.fastModelsDescription" | "settings.balancedModelsDescription" | "settings.smartModelsDescription";
+  models: Array<{ name: string; descriptionKey: TranslationModelDescriptionKey }>;
+}> = [
+  {
+    id: "fast",
+    titleKey: "settings.fastModels",
+    descriptionKey: "settings.fastModelsDescription",
+    models: [
+      { name: "llama3.2:latest", descriptionKey: "settings.modelDescription.llama32" },
+      { name: "mistral:latest", descriptionKey: "settings.modelDescription.mistral" },
+      { name: "gemma:latest", descriptionKey: "settings.modelDescription.gemma" },
+    ],
+  },
+  {
+    id: "balanced",
+    titleKey: "settings.balancedModels",
+    descriptionKey: "settings.balancedModelsDescription",
+    models: [
+      { name: "llama3.1:latest", descriptionKey: "settings.modelDescription.llama31" },
+      { name: "qwen2.5:latest", descriptionKey: "settings.modelDescription.qwen" },
+      { name: "neutron:latest", descriptionKey: "settings.modelDescription.neutron" },
+    ],
+  },
+  {
+    id: "smart",
+    titleKey: "settings.smartModels",
+    descriptionKey: "settings.smartModelsDescription",
+    models: [
+      { name: "deepseek-r1:latest", descriptionKey: "settings.modelDescription.deepseek" },
+      { name: "qwen2.5:latest", descriptionKey: "settings.modelDescription.qwen" },
+      { name: "kimi-k2-thinking:cloud", descriptionKey: "settings.modelDescription.kimi" },
+      { name: "glm4:latest", descriptionKey: "settings.modelDescription.glm" },
+    ],
+  },
 ] as const;
+
+type TranslationModelDescriptionKey =
+  | "settings.modelDescription.llama31"
+  | "settings.modelDescription.llama32"
+  | "settings.modelDescription.mistral"
+  | "settings.modelDescription.gemma"
+  | "settings.modelDescription.qwen"
+  | "settings.modelDescription.deepseek"
+  | "settings.modelDescription.kimi"
+  | "settings.modelDescription.glm"
+  | "settings.modelDescription.neutron";
 
 export function SettingsPage({ clearAiHistory, settings, updateSettings }: SettingsPageProps) {
   const { language, languageNames, setLanguage, t } = useI18n();
@@ -51,12 +96,16 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const [installingModel, setInstallingModel] = useState("");
   const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
   const [pullMessage, setPullMessage] = useState("");
+  const [pullNames, setPullNames] = useState<Record<string, string>>(() => getDefaultPullNames());
+  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
+  const [deletingModel, setDeletingModel] = useState("");
+  const [modelActionMessage, setModelActionMessage] = useState("");
   const [notificationStatus, setNotificationStatus] = useState("");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ status: "idle" });
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [cacheStatus, setCacheStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [storageNotice, setStorageNotice] = useState("");
-  const [confirmAction, setConfirmAction] = useState<"cache" | "history" | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
 
   const installedModels = ollamaStatus?.models ?? [];
   const selectedModelInstalled = ollamaStatus?.selectedModelInstalled ?? installedModels.some((model) => model.name === settings.localModel);
@@ -79,7 +128,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
     const removeUpdateListener = window.todoAI?.onUpdateStatus((payload) => setUpdateStatus(payload));
     const removePullListener = window.todoAI?.onOllamaPullProgress((payload) => {
       setPullProgress(payload);
-      if (payload.status) setPullMessage(payload.status);
+      if (payload.step || payload.status) setPullMessage(payload.step ?? payload.status ?? "");
       if (payload.status === "success") {
         setPullState("success");
         setInstallingModel("");
@@ -130,11 +179,15 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   }
 
   async function handlePullModel(modelName: string) {
+    const safeModelName = modelName.trim();
+    if (!safeModelName) return;
     setPullState("loading");
-    setInstallingModel(modelName);
+    setInstallingModel(safeModelName);
     setPullMessage(t("settings.installingModel"));
     setPullProgress(null);
-    const result = await window.todoAI?.pullOllamaModel(modelName);
+    setShowTechnicalDetails(false);
+    setModelActionMessage("");
+    const result = await window.todoAI?.pullOllamaModel(safeModelName);
     if (!result?.ok) {
       setPullState("error");
       setPullMessage(result?.message ?? t("settings.modelInstallFailed"));
@@ -144,8 +197,29 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
     setPullState("success");
     setInstallingModel("");
     setPullMessage(t("settings.modelInstalled"));
-    updateSettings({ localModel: modelName });
+    updateSettings({ localModel: safeModelName });
     await refreshOllamaStatus(false);
+  }
+
+  async function handleDeleteModel(modelName: string) {
+    setDeletingModel(modelName);
+    setModelActionMessage("");
+    try {
+      const result = await window.todoAI?.deleteOllamaModel(modelName);
+      if (!result?.ok) {
+        setModelActionMessage(result?.message ?? t("settings.modelDeleteFailed"));
+        return;
+      }
+      setModelActionMessage(t("settings.modelDeleted"));
+      if (modelMatches(settings.localModel, modelName)) {
+        const nextModel = installedModels.find((model) => !modelMatches(model.name, modelName));
+        updateSettings({ localModel: nextModel?.name ?? "llama3.1:latest" });
+      }
+      await refreshOllamaStatus(false);
+    } finally {
+      setDeletingModel("");
+      setConfirmAction(null);
+    }
   }
 
   async function handleTestNotification() {
@@ -258,7 +332,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         </fieldset>
       </SettingsSection>
 
-      <SettingsSection icon={Cpu} title={t("settings.aiSetup")} description={t("settings.aiSetupDescription")}>
+      <SettingsSection icon={Cpu} title={t("settings.aiModels")} description={t("settings.aiSetupDescription")}>
         <div className="setup-status-row">
           <span className={`status-pill status-pill--${aiStatusTone}`}>{aiStatusText}</span>
           <button className="button button--secondary" disabled={isRefreshingModels} onClick={() => void refreshOllamaStatus()} type="button">
@@ -316,45 +390,94 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
           </select>
         </label>
 
-        <div className="recommended-models smart-models">
-          <div>
-            <strong>{t("settings.smartModels")}</strong>
-            <p>{t("settings.smartModelsDescription")}</p>
+        {missingSelectedModel ? (
+          <div className="settings-warning">
+            <AlertTriangle size={16} />
+            <span>{t("settings.missingModelWarning")}</span>
           </div>
-          <div className="smart-model-list">
-            {smartModels.map((model) => {
-              const installed = installedModels.some((installedModel) => modelMatches(installedModel.name, model.name));
+        ) : null}
+
+        {installedModels.length ? (
+          <div className="installed-model-list">
+            {installedModels.map((model) => {
               const selected = modelMatches(settings.localModel, model.name);
-              const isInstallingThis = pullState === "loading" && installingModel === model.name;
+              const deleting = deletingModel === model.name;
               return (
-                <article className="smart-model" key={model.name}>
+                <article className="installed-model" key={model.name}>
                   <div>
-                    <div className="smart-model__header">
-                      <strong>{model.name}</strong>
-                      {selected ? <span className="status-pill status-pill--connected">{t("settings.selected")}</span> : installed ? <span className="status-pill">{t("settings.installed")}</span> : null}
-                    </div>
-                    <p>{t(model.descriptionKey)}</p>
+                    <strong>{model.name}</strong>
+                    {model.size ? <span>{formatBytes(model.size)}</span> : null}
                   </div>
-                  {installed ? (
-                    <button className="button button--secondary" onClick={() => updateSettings({ localModel: model.name })} type="button">
+                  <div className="model-row-actions">
+                    <button className="button button--secondary" disabled={selected} onClick={() => updateSettings({ localModel: model.name })} type="button">
                       <Check size={16} />
                       {selected ? t("settings.selected") : t("settings.useModel")}
                     </button>
-                  ) : (
-                    <button
-                      className="button button--secondary"
-                      disabled={pullState === "loading" || ollamaStatus?.status === "not-installed"}
-                      onClick={() => void handlePullModel(model.name)}
-                      type="button"
-                    >
-                      {isInstallingThis ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
-                      {t("settings.installModel")}
+                    <button className="button button--danger" disabled={deleting} onClick={() => setConfirmAction({ type: "delete-model", modelName: model.name })} type="button">
+                      {deleting ? <Loader2 size={16} className="spin-icon" /> : <Trash2 size={16} />}
+                      {t("settings.deleteModel")}
                     </button>
-                  )}
+                  </div>
                 </article>
               );
             })}
           </div>
+        ) : null}
+
+        {modelActionMessage ? <p className={modelActionMessage === t("settings.modelDeleted") ? "settings-success" : "settings-error"}>{modelActionMessage}</p> : null}
+
+        <div className="model-groups">
+          {recommendedModelGroups.map((group) => (
+            <div className="recommended-models smart-models" key={group.id}>
+              <div>
+                <strong>{t(group.titleKey)}</strong>
+                <p>{t(group.descriptionKey)}</p>
+              </div>
+              <div className="smart-model-list">
+                {group.models.map((model) => {
+                  const pullName = pullNames[model.name] ?? model.name;
+                  const installed = installedModels.some((installedModel) => modelMatches(installedModel.name, pullName));
+                  const selected = modelMatches(settings.localModel, pullName);
+                  const isInstallingThis = pullState === "loading" && installingModel === pullName;
+                  return (
+                    <article className="smart-model" key={`${group.id}-${model.name}`}>
+                      <div>
+                        <div className="smart-model__header">
+                          <strong>{model.name}</strong>
+                          {selected ? <span className="status-pill status-pill--connected">{t("settings.selected")}</span> : installed ? <span className="status-pill">{t("settings.installed")}</span> : null}
+                        </div>
+                        <p>{t(model.descriptionKey)}</p>
+                        <label className="model-pull-name">
+                          <span>{t("settings.pullName")}</span>
+                          <input
+                            value={pullName}
+                            onChange={(event) => setPullNames((current) => ({ ...current, [model.name]: event.target.value }))}
+                            disabled={pullState === "loading"}
+                          />
+                        </label>
+                      </div>
+                      {installed ? (
+                        <button className="button button--secondary" onClick={() => updateSettings({ localModel: pullName })} type="button">
+                          <Check size={16} />
+                          {selected ? t("settings.selected") : t("settings.useModel")}
+                        </button>
+                      ) : (
+                        <button
+                          className="button button--secondary"
+                          disabled={pullState === "loading" || ollamaStatus?.status === "not-installed"}
+                          onClick={() => void handlePullModel(pullName)}
+                          type="button"
+                        >
+                          {isInstallingThis ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
+                          {t("settings.installModel")}
+                        </button>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
 
         {missingSelectedModel || !installedModels.length ? (
@@ -364,16 +487,16 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
               <p>{t("settings.recommendedModelsDescription")}</p>
             </div>
             <div className="model-install-list">
-              {smartModels.slice(0, 3).map((model) => (
+              {recommendedModelGroups[0].models.map((model) => (
                 <button
                   className="button button--secondary"
                   disabled={pullState === "loading" || ollamaStatus?.status === "not-installed"}
                   key={model.name}
-                  onClick={() => void handlePullModel(model.name)}
+                  onClick={() => void handlePullModel(pullNames[model.name] ?? model.name)}
                   type="button"
                 >
-                  {pullState === "loading" && installingModel === model.name ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
-                  {t("settings.installModel")} {model.name}
+                  {pullState === "loading" && installingModel === (pullNames[model.name] ?? model.name) ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
+                  {t("settings.installModel")} {pullNames[model.name] ?? model.name}
                 </button>
               ))}
             </div>
@@ -384,14 +507,29 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
           <div className={`install-progress install-progress--${pullState}`}>
             <div className="install-progress__header">
               {pullState === "success" ? <CheckCircle2 size={16} /> : pullState === "error" ? <AlertTriangle size={16} /> : <Loader2 size={16} className="spin-icon" />}
-              <span>{pullState === "success" ? t("settings.modelInstalled") : pullState === "error" ? t("settings.modelInstallFailed") : t("settings.installingModel")}</span>
+              <div>
+                <span>{pullState === "success" ? t("settings.modelInstalled") : pullState === "error" ? t("settings.modelInstallFailed") : t("settings.installingModel")}</span>
+                <small>{installingModel || pullProgress?.modelName || settings.localModel}</small>
+              </div>
             </div>
-            <ProgressText payload={pullProgress} fallback={pullMessage} />
-            {pullState === "loading" ? (
-              <button className="button button--secondary" onClick={() => void window.todoAI?.cancelOllamaPull()} type="button">
-                {t("settings.cancel")}
-              </button>
-            ) : null}
+            <ProgressText payload={pullProgress} fallback={pullMessage} t={t} />
+            <div className="install-progress__actions">
+              {pullProgress?.details ? (
+                <button className="text-button" onClick={() => setShowTechnicalDetails((value) => !value)} type="button">
+                  {showTechnicalDetails ? t("settings.hideTechnicalDetails") : t("settings.showTechnicalDetails")}
+                </button>
+              ) : null}
+              {pullState === "loading" ? (
+                <button className="button button--secondary" onClick={() => void window.todoAI?.cancelOllamaPull()} type="button">
+                  {t("settings.cancel")}
+                </button>
+              ) : (
+                <button className="button button--secondary" onClick={() => setPullState("idle")} type="button">
+                  {t("settings.close")}
+                </button>
+              )}
+            </div>
+            {showTechnicalDetails && pullProgress?.details ? <pre className="install-progress__details">{pullProgress.details}</pre> : null}
           </div>
         ) : null}
 
@@ -502,11 +640,11 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
 
       <SettingsSection icon={Database} title={t("settings.data")} description={t("settings.dataDescription")}>
         <div className="data-actions">
-          <button className="button button--secondary" disabled={cacheStatus === "loading"} onClick={() => setConfirmAction("cache")} type="button">
+          <button className="button button--secondary" disabled={cacheStatus === "loading"} onClick={() => setConfirmAction({ type: "cache" })} type="button">
             <Download size={16} />
             {cacheStatus === "loading" ? t("settings.clearingCache") : t("settings.clearCache")}
           </button>
-          <button className="button button--secondary" onClick={() => setConfirmAction("history")} type="button">
+          <button className="button button--secondary" onClick={() => setConfirmAction({ type: "history" })} type="button">
             <Download size={16} />
             {t("settings.clearAiHistory")}
           </button>
@@ -519,14 +657,21 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         <div className="confirm-overlay" role="presentation" onMouseDown={() => setConfirmAction(null)}>
           <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-confirm-title" onMouseDown={(event) => event.stopPropagation()}>
             <h2 id="settings-confirm-title">
-              {confirmAction === "cache" ? t("settings.confirmClearCacheTitle") : t("settings.confirmClearHistoryTitle")}
+              {getConfirmTitle(confirmAction, t)}
             </h2>
-            <p>{confirmAction === "cache" ? t("settings.confirmClearCacheDescription") : t("settings.confirmClearHistoryDescription")}</p>
+            <p>{getConfirmDescription(confirmAction, t)}</p>
             <div className="confirm-dialog__actions">
               <button className="button button--secondary" onClick={() => setConfirmAction(null)}>
                 {t("settings.cancel")}
               </button>
-              <button className="button button--primary" onClick={() => (confirmAction === "cache" ? void handleClearCache() : handleClearHistory())}>
+              <button
+                className={confirmAction.type === "delete-model" ? "button button--danger" : "button button--primary"}
+                onClick={() => {
+                  if (confirmAction.type === "cache") void handleClearCache();
+                  if (confirmAction.type === "history") handleClearHistory();
+                  if (confirmAction.type === "delete-model") void handleDeleteModel(confirmAction.modelName);
+                }}
+              >
                 {t("settings.confirm")}
               </button>
             </div>
@@ -550,15 +695,28 @@ function SetupCallout({ icon, title, description, action }: { icon: ReactNode; t
   );
 }
 
-function ProgressText({ payload, fallback }: { payload: unknown; fallback: string }) {
-  if (isRecord(payload) && typeof payload.percent === "number") {
-    return (
-      <div className="install-progress__bar" aria-label={`${payload.percent}%`}>
-        <span style={{ width: `${Math.max(2, Math.min(100, payload.percent))}%` }} />
+function ProgressText({ payload, fallback, t }: { payload: OllamaPullProgress | null; fallback: string; t: ReturnType<typeof useI18n>["t"] }) {
+  const percent = typeof payload?.percent === "number" ? Math.max(0, Math.min(100, payload.percent)) : undefined;
+  return (
+    <div className="install-progress__body">
+      <p>{payload?.step || fallback}</p>
+      {percent !== undefined ? (
+        <div className="install-progress__bar" aria-label={`${percent}%`}>
+          <span style={{ width: `${Math.max(2, percent)}%` }} />
+        </div>
+      ) : null}
+      <div className="install-progress__meta">
+        {percent !== undefined ? <span>{percent}%</span> : null}
+        {typeof payload?.completed === "number" && typeof payload.total === "number" ? (
+          <span>{formatBytes(payload.completed)} / {formatBytes(payload.total)}</span>
+        ) : null}
+        {typeof payload?.speedBytesPerSecond === "number" && payload.speedBytesPerSecond > 0 ? (
+          <span>{formatBytes(payload.speedBytesPerSecond)}/s</span>
+        ) : null}
+        {!payload && fallback ? <span>{t("settings.preparingDownload")}</span> : null}
       </div>
-    );
-  }
-  return <p>{fallback}</p>;
+    </div>
+  );
 }
 
 function SettingsSection({
@@ -605,4 +763,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function modelMatches(installedModel: string, selectedModel: string) {
   return installedModel === selectedModel || installedModel.replace(/:latest$/, "") === selectedModel || selectedModel.replace(/:latest$/, "") === installedModel;
+}
+
+function getDefaultPullNames() {
+  return Object.fromEntries(recommendedModelGroups.flatMap((group) => group.models.map((model) => [model.name, model.name])));
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  const amount = value / 1024 ** index;
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function getConfirmTitle(
+  action: ConfirmAction,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  if (action.type === "cache") return t("settings.confirmClearCacheTitle");
+  if (action.type === "history") return t("settings.confirmClearHistoryTitle");
+  return t("settings.confirmDeleteModelTitle");
+}
+
+function getConfirmDescription(
+  action: ConfirmAction,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  if (action.type === "cache") return t("settings.confirmClearCacheDescription");
+  if (action.type === "history") return t("settings.confirmClearHistoryDescription");
+  return `${t("settings.confirmDeleteModelDescription")} ${action.modelName}`;
 }

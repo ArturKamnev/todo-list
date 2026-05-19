@@ -266,30 +266,6 @@ textarea {
   font-size: var(--font-xs);
 }
 
-.sidebar-card {
-  margin-top: auto;
-  padding: 13px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-}
-
-.sidebar-card span {
-  display: block;
-  margin-bottom: 8px;
-  color: var(--text-soft);
-  font-size: var(--font-xs);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.sidebar-card strong {
-  font-size: var(--font-sm);
-  font-weight: 650;
-  line-height: 1.45;
-}
-
 .main-area {
   display: flex;
   min-width: 0;
@@ -357,6 +333,12 @@ textarea {
 .button--secondary {
   color: var(--text);
   background: var(--surface-raised);
+}
+
+.button--danger {
+  color: var(--danger);
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface-raised));
+  border-color: color-mix(in oklch, var(--danger) 24%, var(--border));
 }
 
 .icon-button {
@@ -1610,6 +1592,45 @@ kbd {
   gap: 8px;
 }
 
+.model-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.installed-model-list {
+  display: grid;
+  gap: 8px;
+}
+
+.installed-model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.installed-model strong,
+.installed-model span {
+  display: block;
+}
+
+.installed-model span {
+  margin-top: 3px;
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+}
+
+.model-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .smart-model {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
@@ -1635,6 +1656,38 @@ kbd {
   line-height: 1.4;
 }
 
+.model-pull-name {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-top: 9px;
+}
+
+.model-pull-name span {
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+  font-weight: 700;
+}
+
+.model-pull-name input {
+  min-height: 30px;
+  padding: 0 8px;
+  font-size: var(--font-sm);
+}
+
+.settings-warning {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  color: var(--warning);
+  background: color-mix(in oklch, var(--warning) 10%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--warning) 28%, var(--border));
+  border-radius: var(--radius-md);
+  font-size: var(--font-sm);
+}
+
 .install-progress {
   display: grid;
   gap: 10px;
@@ -1657,6 +1710,52 @@ kbd {
   align-items: center;
   gap: 8px;
   font-weight: 700;
+}
+
+.install-progress__header div {
+  display: grid;
+  gap: 2px;
+}
+
+.install-progress__header small {
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.install-progress__body {
+  display: grid;
+  gap: 8px;
+}
+
+.install-progress__meta,
+.install-progress__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.install-progress__meta {
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+}
+
+.install-progress__actions {
+  justify-content: space-between;
+}
+
+.install-progress__details {
+  max-height: 120px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font: 12px/1.45 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  white-space: pre-wrap;
 }
 
 .install-progress__bar {
@@ -2151,6 +2250,12 @@ kbd {
     background: var(--accent-strong);
   }
 
+  .button--danger:hover {
+    color: var(--danger);
+    border-color: color-mix(in oklch, var(--danger) 42%, var(--border));
+    background: color-mix(in oklch, var(--danger) 12%, var(--surface-raised));
+  }
+
   .task-card:hover,
   .timeline-task:hover,
   .project-card:hover,
@@ -2239,8 +2344,7 @@ kbd {
   .brand-row div:not(.brand-mark),
   .sidebar__collapse,
   .sidebar-nav__item span,
-  .project-list,
-  .sidebar-card {
+  .project-list {
     display: none;
   }
 
@@ -2282,11 +2386,14 @@ kbd {
   .recommended-models,
   .smart-models,
   .smart-model,
+  .installed-model,
   .setup-callout {
     grid-template-columns: 1fr;
   }
 
-  .model-install-list {
+  .model-install-list,
+  .model-row-actions,
+  .install-progress__actions {
     justify-content: flex-start;
   }
 

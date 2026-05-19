@@ -11,13 +11,21 @@ const recommendedModels = new Set([
   "llama3.1:latest",
   "llama3.2:latest",
   "mistral:latest",
+  "gemma:latest",
   "qwen2.5:latest",
   "deepseek-r1:latest",
+  "kimi-k2-thinking:cloud",
+  "glm4:latest",
+  "neutron:latest",
   "llama3.1",
   "llama3.2",
   "mistral",
+  "gemma",
   "qwen2.5",
   "deepseek-r1",
+  "kimi-k2-thinking",
+  "glm4",
+  "neutron",
 ]);
 
 type UpdateStatus = "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error" | "unavailable";
@@ -27,6 +35,18 @@ interface OllamaModel {
   name: string;
   modifiedAt?: string;
   size?: number;
+}
+
+interface PullProgressPayload {
+  status?: string;
+  completed?: number;
+  total?: number;
+  percent?: number;
+  speedBytesPerSecond?: number;
+  step?: string;
+  details?: string;
+  message?: string;
+  type?: string;
 }
 
 interface NotificationTaskPayload {
@@ -101,6 +121,11 @@ app.whenReady().then(() => {
     const safeModelName = readSafeModelName(modelName);
     if (!safeModelName) return { ok: false, message: "Invalid model name." };
     return pullOllamaModel(event.sender.id, safeModelName);
+  });
+  ipcMain.handle("ollama:delete-model", async (_event, modelName?: unknown) => {
+    const safeModelName = readSafeModelName(modelName);
+    if (!safeModelName) return { ok: false, message: "Invalid model name." };
+    return deleteOllamaModel(safeModelName);
   });
   ipcMain.handle("ollama:cancel-pull", () => {
     if (!activePull) return { ok: true };
@@ -334,8 +359,10 @@ async function pullOllamaModel(senderId: number, modelName: string) {
     activePull = child;
     const senderWindow = BrowserWindow.getAllWindows().find((window) => window.webContents.id === senderId);
     let lastMessage = "";
+    let lastCompleted = 0;
+    let lastTimestamp = Date.now();
 
-    const sendProgress = (payload: Record<string, unknown>) => {
+    const sendProgress = (payload: PullProgressPayload) => {
       senderWindow?.webContents.send("ollama:pull-progress", { modelName, ...payload });
     };
 
@@ -345,22 +372,36 @@ async function pullOllamaModel(senderId: number, modelName: string) {
         try {
           const payload = JSON.parse(line) as { status?: string; completed?: number; total?: number };
           lastMessage = payload.status ?? lastMessage;
+          const now = Date.now();
+          const completed = typeof payload.completed === "number" ? payload.completed : undefined;
+          const total = typeof payload.total === "number" ? payload.total : undefined;
+          const elapsedSeconds = Math.max(0.1, (now - lastTimestamp) / 1000);
+          const speedBytesPerSecond = completed !== undefined && completed >= lastCompleted
+            ? Math.round((completed - lastCompleted) / elapsedSeconds)
+            : undefined;
+          if (completed !== undefined) {
+            lastCompleted = completed;
+            lastTimestamp = now;
+          }
           sendProgress({
             status: payload.status ?? "downloading",
-            completed: payload.completed,
-            total: payload.total,
-            percent: payload.total && payload.completed ? Math.round((payload.completed / payload.total) * 100) : undefined,
+            step: normalizePullStep(payload.status),
+            completed,
+            total,
+            speedBytesPerSecond,
+            percent: total && completed !== undefined ? Math.round((completed / total) * 100) : undefined,
+            details: line,
           });
         } catch {
           lastMessage = line;
-          sendProgress({ status: line });
+          sendProgress({ status: "working", step: normalizePullStep(line), details: line });
         }
       }
     });
 
     child.stderr.on("data", (data: Buffer) => {
       lastMessage = data.toString("utf8").trim() || lastMessage;
-      sendProgress({ status: lastMessage, type: "error-output" });
+      sendProgress({ status: "working", step: normalizePullStep(lastMessage), details: lastMessage, type: "error-output" });
     });
 
     child.on("close", (code) => {
@@ -374,6 +415,40 @@ async function pullOllamaModel(senderId: number, modelName: string) {
       }
     });
   });
+}
+
+async function deleteOllamaModel(modelName: string) {
+  const executable = await findOllamaExecutable();
+  if (!executable) return { ok: false, status: "not-installed", message: "Ollama is not installed." };
+
+  return new Promise((resolve) => {
+    execFile(executable, ["rm", modelName], { windowsHide: true }, (error, stdout, stderr) => {
+      if (error) {
+        const message = sanitizeCommandMessage(stderr || stdout || error.message || "Could not delete model.");
+        resolve({ ok: false, modelName, message });
+        return;
+      }
+      resolve({ ok: true, modelName });
+    });
+  });
+}
+
+function normalizePullStep(status: string | undefined) {
+  if (!status) return "Preparing download";
+  const normalized = status.toLowerCase();
+  if (normalized.includes("pulling manifest")) return "Reading model manifest";
+  if (normalized.includes("pulling") || normalized.includes("downloading")) return "Downloading model files";
+  if (normalized.includes("verifying")) return "Verifying download";
+  if (normalized.includes("writing")) return "Writing model to disk";
+  if (normalized.includes("removing")) return "Cleaning up";
+  if (normalized.includes("success")) return "Installed";
+  if (normalized.includes("error")) return "Install failed";
+  return status.length > 120 ? `${status.slice(0, 117)}...` : status;
+}
+
+function sanitizeCommandMessage(value: string) {
+  const normalized = value.replace(/\u001b\[[0-9;]*m/g, "").replace(/\s+/g, " ").trim();
+  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized || "Command failed.";
 }
 
 async function findOllamaExecutable() {

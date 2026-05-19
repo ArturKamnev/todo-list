@@ -77,10 +77,6 @@ export function Sidebar({ activeView, setActiveView, projects, tasks }: SidebarP
         })}
       </div>
 
-      <div className="sidebar-card">
-        <span>{t("sidebar.aiFocus")}</span>
-        <strong>{t("sidebar.aiFocusText")}</strong>
-      </div>
     </aside>
   );
 }

@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("todoAI", {
   openOllamaDownload: () => ipcRenderer.invoke("ollama:open-download"),
   startOllama: () => ipcRenderer.invoke("ollama:start"),
   pullOllamaModel: (modelName: string) => ipcRenderer.invoke("ollama:pull-model", modelName),
+  deleteOllamaModel: (modelName: string) => ipcRenderer.invoke("ollama:delete-model", modelName),
   cancelOllamaPull: () => ipcRenderer.invoke("ollama:cancel-pull"),
   onOllamaPullProgress: (callback: (payload: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);

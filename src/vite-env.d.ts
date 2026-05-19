@@ -13,6 +13,7 @@ interface Window {
     openOllamaDownload: () => Promise<{ ok: boolean }>;
     startOllama: () => Promise<{ ok: boolean; status?: string; message?: string }>;
     pullOllamaModel: (modelName: string) => Promise<{ ok: boolean; modelName?: string; status?: string; message?: string }>;
+    deleteOllamaModel: (modelName: string) => Promise<{ ok: boolean; modelName?: string; status?: string; message?: string }>;
     cancelOllamaPull: () => Promise<{ ok: boolean }>;
     onOllamaPullProgress: (callback: (payload: OllamaPullProgress) => void) => () => void;
     scheduleTaskNotifications: (tasks: NotificationTaskPayload[], settings: NotificationSettingsPayload) => Promise<{ ok: boolean; scheduled: number }>;
@@ -44,6 +45,9 @@ type OllamaPullProgress = {
   completed?: number;
   total?: number;
   percent?: number;
+  speedBytesPerSecond?: number;
+  step?: string;
+  details?: string;
   message?: string;
   type?: string;
 };

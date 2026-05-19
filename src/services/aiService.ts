@@ -82,30 +82,30 @@ export async function chatWithAssistant(
 ): Promise<AIChatResult> {
   if (mode === "plan_day") {
     const raw = await requestOllamaChat(settings, [
-      { role: "system", content: buildPlanPrompt(taskContext) },
+      { role: "system", content: buildPlanPrompt(taskContext, settings.language) },
       { role: "user", content: userMessage },
     ], { json: true });
     const plan = await parseOrRepairStructured(raw, "plan_day", settings, validatePlanDayResult);
     return {
-      message: createAssistantMessage(renderPlanMessage(plan)),
+      message: createAssistantMessage(renderPlanMessage(plan, settings.language)),
     };
   }
 
   const raw = await requestOllamaChat(settings, [
-    { role: "system", content: buildCreateTasksPrompt(taskContext) },
+    { role: "system", content: buildCreateTasksPrompt(taskContext, settings.language) },
     { role: "user", content: userMessage },
   ], { json: true });
   const action = await parseOrRepairStructured(raw, "create_tasks", settings, validateCreateTasksAction);
 
   return {
-    message: createAssistantMessage(renderCreateTasksMessage(action.action.tasks.length), { actionType: action.action.type }),
+    message: createAssistantMessage(renderCreateTasksMessage(action.action.tasks.length, settings.language), { actionType: action.action.type }),
     action: action.action,
   };
 }
 
 export async function breakDownTaskWithAI(task: Task, settings: UserSettings): Promise<string[]> {
   const raw = await requestOllamaChat(settings, [
-    { role: "system", content: buildBreakdownPrompt(task) },
+    { role: "system", content: buildBreakdownPrompt(task, settings.language) },
     { role: "user", content: `Break this task into practical subtasks: ${task.title}\n\n${task.description}` },
   ], { json: true });
 
@@ -241,12 +241,12 @@ async function parseOrRepairStructured<T>(
   settings: UserSettings,
   validate: (value: unknown) => T | undefined,
 ): Promise<T> {
-  const parsed = parseStructured(raw, validate);
+  const parsed = parseStructured(raw, validate, schema, settings.language);
   if (parsed) return parsed;
 
   logInvalidAIResponse(raw, schema, "initial");
   const repaired = await repairStructuredResponse(raw, schema, settings);
-  const repairedParsed = parseStructured(repaired, validate);
+  const repairedParsed = parseStructured(repaired, validate, schema, settings.language);
   if (repairedParsed) return repairedParsed;
 
   logInvalidAIResponse(repaired, schema, "repair");
@@ -255,13 +255,18 @@ async function parseOrRepairStructured<T>(
   });
 }
 
-function parseStructured<T>(raw: string, validate: (value: unknown) => T | undefined) {
+function parseStructured<T>(
+  raw: string,
+  validate: (value: unknown) => T | undefined,
+  schema: StructuredSchema,
+  language: UserSettings["language"],
+) {
   const candidates = extractJsonCandidates(raw);
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as unknown;
       const valid = validate(parsed);
-      if (valid) return valid;
+      if (valid && isLanguageSafeStructured(valid, schema, language)) return valid;
     } catch {
       // Try the next candidate.
     }
@@ -271,17 +276,17 @@ function parseStructured<T>(raw: string, validate: (value: unknown) => T | undef
 
 async function repairStructuredResponse(raw: string, schema: StructuredSchema, settings: UserSettings) {
   return requestOllamaChat(settings, [
-    { role: "system", content: buildRepairPrompt(schema) },
+    { role: "system", content: buildRepairPrompt(schema, settings.language) },
     { role: "user", content: raw },
   ], { json: true });
 }
 
-function buildPlanPrompt(taskContext: Task[]) {
-  return `${baseStructuredPrompt(taskContext)}
+function buildPlanPrompt(taskContext: Task[], language: UserSettings["language"]) {
+  return `${baseStructuredPrompt(taskContext, language)}
 Mode: plan_day.
 Return one valid JSON object only:
 {
-  "userMessage": "Here is a practical plan for your day.",
+  "userMessage": "${copy(language).planUserMessage}",
   "plan": [
     { "time": "09:00", "title": "Focused work", "description": "Work on the most important task." }
   ]
@@ -296,12 +301,12 @@ Rules:
 - Do not create tasks or claim anything was saved.`;
 }
 
-function buildCreateTasksPrompt(taskContext: Task[]) {
-  return `${baseStructuredPrompt(taskContext)}
+function buildCreateTasksPrompt(taskContext: Task[], language: UserSettings["language"]) {
+  return `${baseStructuredPrompt(taskContext, language)}
 Mode: create_tasks.
 Extract tasks from the user's description. Return one valid JSON object only:
 {
-  "userMessage": "I found 3 tasks. Review them, then create the ones you want.",
+  "userMessage": "${copy(language).createTasksUserMessage}",
   "action": {
     "type": "create_tasks",
     "tasks": [
@@ -338,11 +343,12 @@ Rules:
 - Do not claim tasks were created. The app creates them after user confirmation.`;
 }
 
-function buildBreakdownPrompt(task: Task) {
+function buildBreakdownPrompt(task: Task, language: UserSettings["language"]) {
   return `You are Todo AI inside a desktop task app.
+${languageInstruction(language)}
 Return one valid JSON object only:
 {
-  "userMessage": "Here is a smaller checklist.",
+  "userMessage": "${copy(language).subtasksUserMessage}",
   "subtasks": ["First concrete step", "Second concrete step"]
 }
 
@@ -356,21 +362,22 @@ Task title: ${task.title}
 Task description: ${task.description || "No description."}`;
 }
 
-function buildRepairPrompt(schema: StructuredSchema) {
+function buildRepairPrompt(schema: StructuredSchema, language: UserSettings["language"]) {
   const shape =
     schema === "create_tasks"
-      ? `{"userMessage":"Review these tasks before creating them.","action":{"type":"create_tasks","tasks":[{"title":"Task title","description":"","scheduledAt":null,"durationMinutes":null,"repeat":{"enabled":false,"type":"daily","interval":1,"unit":"day","weekdays":[],"excludedWeekdays":[]},"projectName":"Personal","tags":[]}]}}`
+      ? `{"userMessage":"${copy(language).createTasksUserMessage}","action":{"type":"create_tasks","tasks":[{"title":"Task title","description":"","scheduledAt":null,"durationMinutes":null,"repeat":{"enabled":false,"type":"daily","interval":1,"unit":"day","weekdays":[],"excludedWeekdays":[]},"projectName":"Personal","tags":[]}]}}`
       : schema === "plan_day"
-        ? `{"userMessage":"Here is a practical plan for your day.","plan":[{"time":"09:00","title":"Plan item","description":"What to do."}]}`
-        : `{"userMessage":"Here is a smaller checklist.","subtasks":["First step","Second step","Third step"]}`;
+        ? `{"userMessage":"${copy(language).planUserMessage}","plan":[{"time":"09:00","title":"Plan item","description":"What to do."}]}`
+        : `{"userMessage":"${copy(language).subtasksUserMessage}","subtasks":["First step","Second step","Third step"]}`;
 
   return `Convert the user's content into valid JSON for Todo AI.
+${languageInstruction(language)}
 Return only one JSON object. No markdown fences. No commentary.
 Required schema:
 ${shape}`;
 }
 
-function baseStructuredPrompt(taskContext: Task[]) {
+function baseStructuredPrompt(taskContext: Task[], language: UserSettings["language"]) {
   const taskSummary = taskContext
     .slice(0, 20)
     .map((task) => `- ${task.title} | status=${task.status} | scheduledAt=${task.scheduledAt ?? "none"} | duration=${task.durationMinutes ?? "none"} | repeat=${task.repeat.enabled ? "yes" : "no"}`)
@@ -378,6 +385,7 @@ function baseStructuredPrompt(taskContext: Task[]) {
 
   return `You are Todo AI, a practical desktop productivity assistant.
 Current date: ${getTodayISO()}.
+${languageInstruction(language)}
 Follow the selected mode strictly. Keep wording concise and useful. Ask for clarification only when the request cannot be completed safely.
 Never return markdown fences. Never show raw JSON to the user. Never invent that app state changed.
 Only return structured data for the internal action schema requested by the system.
@@ -487,16 +495,19 @@ function readScheduleValue(value: Record<string, unknown>) {
   return time ? `${date}T${time}` : date;
 }
 
-function renderPlanMessage(plan: PlanDayResult) {
+function renderPlanMessage(plan: PlanDayResult, language: UserSettings["language"]) {
   const items = plan.plan.map((item) => {
     const prefix = item.time ? `${item.time} ` : "";
     const description = item.description ? `: ${item.description}` : "";
     return `${prefix}${item.title}${description}`;
   });
-  return [sanitizeAssistantText(plan.userMessage, "Here is a practical plan for your day."), ...items.map((item) => `- ${item}`)].join("\n");
+  return [sanitizeAssistantText(plan.userMessage, copy(language).planUserMessage), ...items.map((item) => `- ${item}`)].join("\n");
 }
 
-function renderCreateTasksMessage(count: number) {
+function renderCreateTasksMessage(count: number, language: UserSettings["language"]) {
+  if (language === "ru") {
+    return count === 1 ? "Я нашел 1 задачу. Проверьте ее перед созданием." : `Я нашел ${count} задач. Проверьте их перед созданием.`;
+  }
   return count === 1 ? "I found 1 task. Review it before creating it." : `I found ${count} tasks. Review them before creating them.`;
 }
 
@@ -504,6 +515,7 @@ function sanitizeAssistantText(value: string, fallback: string) {
   const trimmed = value.trim();
   if (!trimmed) return fallback;
   if (trimmed.includes("{") || trimmed.includes("}") || trimmed.includes("[") || trimmed.includes("]")) return fallback;
+  if (hasCjkCharacters(trimmed)) return fallback;
   return trimmed.length > 240 ? `${trimmed.slice(0, 237).trim()}...` : trimmed;
 }
 
@@ -626,6 +638,48 @@ function normalizeBaseUrl(baseUrl: string) {
 
 function modelMatches(installedModel: string, selectedModel: string) {
   return installedModel === selectedModel || installedModel.replace(/:latest$/, "") === selectedModel || selectedModel.replace(/:latest$/, "") === installedModel;
+}
+
+function isLanguageSafeStructured(value: unknown, schema: StructuredSchema, _language: UserSettings["language"]) {
+  if (hasCjkCharacters(JSON.stringify(value))) return false;
+  if (schema === "plan_day" && isRecord(value)) {
+    return typeof value.userMessage !== "string" || !hasCjkCharacters(value.userMessage);
+  }
+  return true;
+}
+
+function hasCjkCharacters(value: string) {
+  return /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/u.test(value);
+}
+
+function languageInstruction(language: UserSettings["language"]) {
+  if (language === "ru") {
+    return [
+      "Response language: Russian only.",
+      "All user-facing strings inside JSON must be Russian.",
+      "Do not answer in English, Chinese, Japanese, or any other language unless the user explicitly asks to translate text.",
+    ].join("\n");
+  }
+
+  return [
+    "Response language: English only.",
+    "All user-facing strings inside JSON must be English.",
+    "Do not answer in Russian, Chinese, Japanese, or any other language unless the user explicitly asks to translate text.",
+  ].join("\n");
+}
+
+function copy(language: UserSettings["language"]) {
+  return language === "ru"
+    ? {
+      planUserMessage: "Вот практичный план на день.",
+      createTasksUserMessage: "Я нашел задачи. Проверьте их перед созданием.",
+      subtasksUserMessage: "Вот короткий список подзадач.",
+    }
+    : {
+      planUserMessage: "Here is a practical plan for your day.",
+      createTasksUserMessage: "I found tasks. Review them before creating them.",
+      subtasksUserMessage: "Here is a smaller checklist.",
+    };
 }
 
 function logAIDebug(message: string, data: Record<string, string | number | boolean | undefined>) {
