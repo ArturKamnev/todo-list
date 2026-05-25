@@ -5,6 +5,8 @@ import { defaultRepeat, normalizeRepeat } from "../utils/recurrence";
 export type AIConnectionStatus = "idle" | "connected" | "not-connected" | "model-missing";
 type StructuredSchema = "create_tasks" | "plan_day" | "replan_tasks" | "create_subtasks";
 const dayMinutes = 24 * 60;
+const guideMaxLength = 2000;
+const taskDraftMaxLength = 800;
 
 export interface AIModelInfo {
   name: string;
@@ -105,27 +107,31 @@ function buildGuidePrompt(taskContext: Task[], language: UserSettings["language"
     .map((task) => `- ${task.title} (status: ${task.status}, scheduled: ${task.scheduledAt ?? "none"})`)
     .join("\n");
 
-  const languagePrompt = language === "ru"
-    ? "Отвечай только на русском языке. Ответ должен быть кратким и полезным. Объясняй функции приложения, если пользователь спрашивает о них."
-    : "Respond in English only. Keep responses concise and helpful. Explain app features if the user asks.";
+  const langBlock = language === "ru"
+    ? "Отвечай только на русском языке."
+    : "Respond in English only.";
 
-  return `You are Aevum, a desktop productivity assistant.
+  return `You are Aevum — an AI-powered desktop planner for tasks, daily schedules, reminders, recurring habits, and time visualization.
+${langBlock}
 Current date: ${getTodayISO()}.
-${languagePrompt}
-You are currently in Guide Mode. Help the user with navigation, explaining features, or general guidance.
-You cannot create, schedule, or modify tasks directly in this mode.
-If the user asks you to create or plan tasks, politely decline and instruct them to select the appropriate tool (Create Tasks or Plan My Day) from the '+' tools menu.
 
-User's tasks:
+Answer the user's question directly and naturally. Be concise but complete.
+When the user asks what Aevum is or what you can do, describe the app's real features: creating tasks, planning the day with AI, setting reminders and recurring schedules, tracking progress on a visual timeline, and managing projects.
+Do not repeat your name or role in every answer. Do not explain internal modes or restrictions unless the user asks.
+If the user asks you to create, schedule, or plan tasks, tell them to tap the + button and select a tool — but only in that situation, not preemptively.
+Do not output JSON, markdown fences, or motivational filler.
+
+User's current tasks:
 ${taskSummary || "No tasks yet."}`;
 }
 
 function buildGuideRepairPrompt(taskContext: Task[], language: UserSettings["language"]) {
+  const langName = language === "ru" ? "Russian" : "English";
   return `${buildGuidePrompt(taskContext, language)}
 
-The previous assistant answer was unusable, malformed, wrong-language, or low quality.
-Rewrite it once. Return plain natural text only, in the UI language only.
-Do not return JSON. Do not create, schedule, update, delete, or imply saved task changes.`;
+IMPORTANT: The previous assistant answer was broken, in the wrong language, or unusable.
+Rewrite it as a single clean answer in ${langName} only.
+Return plain natural text. No JSON, no markdown fences, no reasoning tags, no task mutations.`;
 }
 
 function authorizeActionResult(
@@ -307,7 +313,7 @@ export async function testOllamaConnection(settings: UserSettings): Promise<AICo
 
 async function requestOllamaChat(
   settings: UserSettings,
-  messages: Array<{ role: "system" | "user"; content: string }>,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
   options: { json?: boolean; mode?: AIRequestMode } = {},
 ) {
   if (settings.aiProvider !== "ollama") {
@@ -326,6 +332,12 @@ async function requestOllamaChat(
     mode: options.mode,
   });
 
+  const ollamaOptions: Record<string, unknown> = {};
+  if (options.json) {
+    ollamaOptions.temperature = 0.1;
+    ollamaOptions.top_p = 0.9;
+  }
+
   const response = await fetchWithProviderErrors(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -333,7 +345,9 @@ async function requestOllamaChat(
       model: settings.localModel,
       messages,
       stream: false,
+      think: false,
       ...(options.json ? { format: "json" } : {}),
+      ...(Object.keys(ollamaOptions).length > 0 ? { options: ollamaOptions } : {}),
     }),
   }, settings);
 
@@ -378,7 +392,8 @@ async function requestOllamaChat(
   }
 
   const payload = (await response.json()) as unknown;
-  const content = readOllamaMessage(payload);
+  const rawContent = readOllamaMessage(payload);
+  const content = sanitizeModelArtifacts(rawContent);
   logAIDebug("Received Ollama assistant content", {
     provider: "ollama",
     requestedModel: settings.localModel,
@@ -409,7 +424,7 @@ async function requestAIChat(
     });
     return result.content;
   }
-  return requestOllamaChat(settings, messages.filter((message) => message.role !== "assistant") as Array<{ role: "system" | "user"; content: string }>, options);
+  return requestOllamaChat(settings, messages, options);
 }
 
 function openRouterError(result: OpenRouterResult | undefined) {
@@ -437,17 +452,17 @@ async function requestGuideText(userMessage: string, taskContext: Task[], settin
     { role: "user", content: userMessage },
   ], { mode: "guide" });
 
-  if (isTextQualitySafe(raw, settings.language)) return sanitizeAssistantText(raw, guideFallback(settings.language));
+  if (isGuideTextSafe(raw, settings.language)) return sanitizeGuideText(raw, guideFallback(settings.language));
 
   logInvalidAIResponse(raw, "guide", "initial", settings);
   const repaired = await requestAIChat(settings, [
     { role: "system", content: buildGuideRepairPrompt(taskContext, settings.language) },
     { role: "user", content: userMessage },
     { role: "assistant", content: raw },
-    { role: "user", content: "Rewrite the previous answer so it is natural, concise, useful, and in the required UI language. Do not return JSON or task mutations." },
+    { role: "user", content: settings.language === "ru" ? "Перепиши предыдущий ответ: естественный, краткий, полезный, только на русском языке. Без JSON." : "Rewrite the previous answer: natural, concise, useful, in English only. No JSON." },
   ], { mode: "guide_repair" });
 
-  if (isTextQualitySafe(repaired, settings.language)) return sanitizeAssistantText(repaired, guideFallback(settings.language));
+  if (isGuideTextSafe(repaired, settings.language)) return sanitizeGuideText(repaired, guideFallback(settings.language));
 
   logInvalidAIResponse(repaired, "guide", "repair", settings);
   throw new AIProviderError(retryWithAnotherModelMessage(settings.language), "invalid_ai_response", {
@@ -842,7 +857,45 @@ function sanitizeAssistantText(value: string, fallback: string) {
   if (!trimmed) return fallback;
   if (trimmed.includes("{") || trimmed.includes("}") || trimmed.includes("[") || trimmed.includes("]")) return fallback;
   if (hasCjkCharacters(trimmed)) return fallback;
-  return trimmed.length > 240 ? `${trimmed.slice(0, 237).trim()}...` : trimmed;
+  return trimmed.length > taskDraftMaxLength ? `${trimmed.slice(0, taskDraftMaxLength - 3).trim()}...` : trimmed;
+}
+
+function sanitizeGuideText(value: string, fallback: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  if (hasCjkCharacters(trimmed)) return fallback;
+  return trimmed.length > guideMaxLength ? `${trimmed.slice(0, guideMaxLength - 3).trim()}...` : trimmed;
+}
+
+function isGuideTextSafe(value: string, language: UserSettings["language"]) {
+  if (typeof value !== "string") return false;
+  const text = value.trim();
+  if (!text || text.length > guideMaxLength + 200) return false;
+  if (hasCjkCharacters(text)) return false;
+  if (/[\uFFFD]/u.test(text)) return false;
+  if (/(.)\1{9,}/u.test(text)) return false;
+  if (/[!?.,:;]{7,}/u.test(text)) return false;
+  const lower = text.toLowerCase();
+  if (lower === "undefined" || lower === "null") return false;
+  const cyrillic = (text.match(/[\u0410-\u044F\u0401\u0451]/g) ?? []).length;
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const alphabetic = cyrillic + latin;
+  if (alphabetic < 8) return true;
+  if (language === "ru") return cyrillic >= latin || cyrillic / alphabetic >= 0.35;
+  return latin >= cyrillic || latin / alphabetic >= 0.65;
+}
+
+function sanitizeModelArtifacts(raw: string): string {
+  let text = raw;
+  // Remove <think>...</think>, <thought>...</thought>, <analysis>...</analysis> blocks
+  text = text.replace(/<(?:think|thought|analysis)>[\s\S]*?<\/(?:think|thought|analysis)>/gi, "");
+  // Remove unclosed <think>, <thought>, <analysis> blocks (model stopped mid-reasoning)
+  text = text.replace(/<(?:think|thought|analysis)>[\s\S]*/gi, "");
+  // Remove control tokens from common model families
+  text = text.replace(/<\|(?:im_start|im_end|endoftext|end|pad|begin_of_text|end_of_text|eot_id|start_header_id|end_header_id)[^>]*\|>/gi, "");
+  // Remove markdown JSON code fences wrapping the entire response
+  text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  return text.trim();
 }
 
 function guideFallback(language: UserSettings["language"]) {
@@ -871,7 +924,7 @@ function isTextQualitySafe(value: string, language: UserSettings["language"]) {
 function isTaskDraftTextSafe(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const text = value.trim();
-  if (!text || text.length > 800) return false;
+  if (!text || text.length > taskDraftMaxLength) return false;
   if (/[{}\[\]]/.test(text)) return false;
   if (hasCjkCharacters(text)) return false;
   if (/[�]/u.test(text)) return false;
@@ -961,7 +1014,8 @@ function readOllamaModels(payload: unknown): AIModelInfo[] {
 }
 
 function extractJsonCandidates(content: string) {
-  const trimmed = stripCodeFence(content.trim());
+  const sanitized = sanitizeModelArtifacts(content);
+  const trimmed = stripCodeFence(sanitized.trim());
   const candidates = new Set<string>();
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) candidates.add(trimmed);
 

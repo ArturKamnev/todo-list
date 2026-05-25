@@ -27,7 +27,7 @@ const defaultSettings: UserSettings = {
   language: "en",
   aiProvider: "ollama",
   aiBaseUrl: "http://localhost:11434",
-  localModel: "llama3.1:latest",
+  localModel: "qwen3.5:9b",
   cloudModel: "openrouter/free",
   notifications: true,
   defaultReminderMinutes: 0,

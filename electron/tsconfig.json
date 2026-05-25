@@ -8,7 +8,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "moduleResolution": "Node",
+    "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["main.ts", "preload.ts"]
+  "include": ["main.ts", "preload.ts", "recommended_models.json"]
 }

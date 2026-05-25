@@ -1,0 +1,24 @@
+{
+  "recommendedModels": [
+    {
+      "name": "qwen3.5:9b",
+      "descriptionKey": "settings.modelDescription.qwen35",
+      "label": "Qwen 3.5 (9B)",
+      "isRussianRecommended": true,
+      "recommended": true
+    },
+    {
+      "name": "gemma4:e4b",
+      "descriptionKey": "settings.modelDescription.gemma4",
+      "label": "Gemma 4 (e4B)",
+      "recommended": false
+    },
+    {
+      "name": "granite4.1:8b",
+      "descriptionKey": "settings.modelDescription.granite41",
+      "label": "Granite 4.1 (8B)",
+      "recommended": false,
+      "isExperimental": true
+    }
+  ]
+}

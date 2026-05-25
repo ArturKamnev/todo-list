@@ -5,6 +5,7 @@ import fs from "node:fs";
 import keytar from "keytar";
 import os from "node:os";
 import path from "node:path";
+import recommendedModelsJson from "./recommended_models.json";
 
 const isDev = !app.isPackaged;
 const ollamaDownloadUrl = "https://ollama.com/download";
@@ -15,26 +16,9 @@ const openRouterAccount = "openrouter";
 const defaultOpenRouterModel = "openrouter/free";
 const openRouterModels = new Set(["openrouter/free", "deepseek/deepseek-v4-flash:free"]);
 const openRouterEndpoint = "https://openrouter.ai/api/v1/chat/completions";
-const recommendedModels = new Set([
-  "llama3.1:latest",
-  "llama3.2:latest",
-  "mistral:latest",
-  "gemma:latest",
-  "qwen2.5:latest",
-  "deepseek-r1:latest",
-  "kimi-k2-thinking:cloud",
-  "glm4:latest",
-  "neutron:latest",
-  "llama3.1",
-  "llama3.2",
-  "mistral",
-  "gemma",
-  "qwen2.5",
-  "deepseek-r1",
-  "kimi-k2-thinking",
-  "glm4",
-  "neutron",
-]);
+const recommendedModels = new Set(
+  recommendedModelsJson.recommendedModels.flatMap((m) => [m.name, m.name.split(":")[0]])
+);
 
 type UpdateStatus = "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error" | "unavailable";
 type OllamaStatus = "connected" | "model-missing" | "not-running" | "not-installed";
@@ -139,7 +123,7 @@ app.whenReady().then(() => {
     return { ok: true };
   });
   ipcMain.handle("ollama:status", async (_event, selectedModel?: unknown, baseUrl?: unknown) => {
-    return checkOllamaStatus(validateModelName(selectedModel, "llama3.1:latest"), validateBaseUrl(baseUrl));
+    return checkOllamaStatus(validateModelName(selectedModel, "qwen3.5:9b"), validateBaseUrl(baseUrl));
   });
   ipcMain.handle("ollama:open-download", async () => {
     await shell.openExternal(ollamaDownloadUrl);

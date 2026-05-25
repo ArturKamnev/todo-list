@@ -26,6 +26,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { AvailabilityBlock, AIProvider, Language, ReminderOffsetMinutes, ThemeMode, TimeFormat, UserSettings } from "../types";
 import { createAvailabilityId } from "../utils/id";
+import recommendedModelsJson from "../../electron/recommended_models.json";
 
 interface SettingsPageProps {
   clearAiHistory: () => void;
@@ -36,47 +37,8 @@ interface SettingsPageProps {
 type SetupStatus = OllamaSetupStatus;
 type UpdateStatus = UpdateCheckResult;
 type PullState = "idle" | "loading" | "success" | "error";
-type ModelGroup = "fast" | "balanced" | "smart";
 type ConfirmAction = { type: "cache" } | { type: "history" } | { type: "delete-model"; modelName: string };
 
-const recommendedModelGroups: Array<{
-  id: ModelGroup;
-  titleKey: "settings.fastModels" | "settings.balancedModels" | "settings.smartModels";
-  descriptionKey: "settings.fastModelsDescription" | "settings.balancedModelsDescription" | "settings.smartModelsDescription";
-  models: Array<{ name: string; descriptionKey: TranslationModelDescriptionKey }>;
-}> = [
-  {
-    id: "fast",
-    titleKey: "settings.fastModels",
-    descriptionKey: "settings.fastModelsDescription",
-    models: [
-      { name: "llama3.2:latest", descriptionKey: "settings.modelDescription.llama32" },
-      { name: "mistral:latest", descriptionKey: "settings.modelDescription.mistral" },
-      { name: "gemma:latest", descriptionKey: "settings.modelDescription.gemma" },
-    ],
-  },
-  {
-    id: "balanced",
-    titleKey: "settings.balancedModels",
-    descriptionKey: "settings.balancedModelsDescription",
-    models: [
-      { name: "llama3.1:latest", descriptionKey: "settings.modelDescription.llama31" },
-      { name: "qwen2.5:latest", descriptionKey: "settings.modelDescription.qwen" },
-      { name: "neutron:latest", descriptionKey: "settings.modelDescription.neutron" },
-    ],
-  },
-  {
-    id: "smart",
-    titleKey: "settings.smartModels",
-    descriptionKey: "settings.smartModelsDescription",
-    models: [
-      { name: "deepseek-r1:latest", descriptionKey: "settings.modelDescription.deepseek" },
-      { name: "qwen2.5:latest", descriptionKey: "settings.modelDescription.qwen" },
-      { name: "kimi-k2-thinking:cloud", descriptionKey: "settings.modelDescription.kimi" },
-      { name: "glm4:latest", descriptionKey: "settings.modelDescription.glm" },
-    ],
-  },
-] as const;
 
 const openRouterModelOptions = [
   {
@@ -93,16 +55,7 @@ const openRouterModelOptions = [
   },
 ] as const;
 
-type TranslationModelDescriptionKey =
-  | "settings.modelDescription.llama31"
-  | "settings.modelDescription.llama32"
-  | "settings.modelDescription.mistral"
-  | "settings.modelDescription.gemma"
-  | "settings.modelDescription.qwen"
-  | "settings.modelDescription.deepseek"
-  | "settings.modelDescription.kimi"
-  | "settings.modelDescription.glm"
-  | "settings.modelDescription.neutron";
+
 
 const weekdayNumbers = [1, 2, 3, 4, 5, 6, 0];
 
@@ -118,7 +71,6 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
   const [installingModel, setInstallingModel] = useState("");
   const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
   const [pullMessage, setPullMessage] = useState("");
-  const [pullNames, setPullNames] = useState<Record<string, string>>(() => getDefaultPullNames());
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
   const [deletingModel, setDeletingModel] = useState("");
   const [modelActionMessage, setModelActionMessage] = useState("");
@@ -239,7 +191,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
       setModelActionMessage(t("settings.modelDeleted"));
       if (modelMatches(settings.localModel, modelName)) {
         const nextModel = installedModels.find((model) => !modelMatches(model.name, modelName));
-        updateSettings({ localModel: nextModel?.name ?? "llama3.1:latest" });
+        updateSettings({ localModel: nextModel?.name ?? "qwen3.5:9b" });
       }
       await refreshOllamaStatus(false);
     } finally {
@@ -368,7 +320,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
 
   return (
     <div className="settings-page">
-      <SettingsSection icon={Monitor} title={t("settings.appearance")} description={t("settings.appearanceDescription")}>
+      <SettingsSection icon={Monitor} title={t("settings.appearance")}>
         <div className="segmented-control">
           {[
             { value: "dark", label: t("settings.dark"), icon: Moon },
@@ -383,7 +335,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
                 onClick={() => updateSettings({ theme: option.value as ThemeMode })}
                 type="button"
               >
-                <Icon size={15} />
+                <Icon size={14} />
                 {option.label}
               </button>
             );
@@ -391,37 +343,25 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         </div>
       </SettingsSection>
 
-      <SettingsSection icon={Languages} title={t("settings.language")} description={t("settings.languageDescription")}>
-        <fieldset className="language-options" aria-label={t("settings.language")}>
+      <SettingsSection icon={Languages} title={t("settings.language")}>
+        <div className="segmented-control">
           {[
-            { value: "en", label: t("settings.languageEnglish"), description: t("settings.languageEnglishDescription") },
-            { value: "ru", label: t("settings.languageRussian"), description: t("settings.languageRussianDescription") },
-          ].map((option) => {
-            const isActive = language === option.value;
-            return (
-              <label className={`language-option ${isActive ? "language-option--active" : ""}`} key={option.value}>
-                <input
-                  checked={isActive}
-                  name="language"
-                  onChange={() => handleLanguageChange(option.value as Language)}
-                  type="radio"
-                  value={option.value}
-                />
-                <span className="language-option__content">
-                  <span className="language-option__label">{option.label}</span>
-                  <span className="language-option__meta">{languageNames[option.value as Language].label}</span>
-                  <span className="language-option__description">{option.description}</span>
-                </span>
-                <span className="language-option__check" aria-hidden="true">
-                  <Check size={15} />
-                </span>
-              </label>
-            );
-          })}
-        </fieldset>
+            { value: "en", label: "English" },
+            { value: "ru", label: "Русский" },
+          ].map((option) => (
+            <button
+              className={language === option.value ? "segmented-control__item segmented-control__item--active" : "segmented-control__item"}
+              key={option.value}
+              onClick={() => handleLanguageChange(option.value as Language)}
+              type="button"
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </SettingsSection>
 
-      <SettingsSection icon={Clock3} title={t("settings.timeFormat")} description={t("settings.timeFormatDescription")}>
+      <SettingsSection icon={Clock3} title={t("settings.timeFormat")}>
         <div className="segmented-control">
           {[
             { value: "24h", label: t("settings.timeFormat24"), meta: "18:30" },
@@ -433,16 +373,16 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
               onClick={() => updateSettings({ timeFormat: option.value as TimeFormat })}
               type="button"
             >
-              <Clock3 size={15} />
+              <Clock3 size={14} />
               <span>{option.label}</span>
-              <small>{option.meta}</small>
+              <small className="meta-text">{option.meta}</small>
             </button>
           ))}
         </div>
       </SettingsSection>
 
       <SettingsSection icon={Cpu} title={t("settings.aiModels")} description={t("settings.aiSetupDescription")}>
-        <div className="segmented-control">
+        <div className="segmented-control segmented-control-spacing">
           {[
             { value: "ollama", label: t("settings.localAI"), icon: Cpu },
             { value: "openrouter", label: t("settings.cloudAI"), icon: KeyRound },
@@ -455,7 +395,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
                 onClick={() => updateSettings({ aiProvider: option.value as AIProvider })}
                 type="button"
               >
-                <Icon size={15} />
+                <Icon size={14} />
                 {option.label}
               </button>
             );
@@ -464,11 +404,11 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
 
         {settings.aiProvider === "openrouter" ? (
           <div className="advanced-settings">
-            <div className="setup-status-row">
+            <div className="field-row">
+              <span>{t("task.sort.status")}</span>
               <span className={`status-pill status-pill--${openRouterStatus === "connected" ? "connected" : "model-missing"}`}>
                 {formatOpenRouterStatus(openRouterStatus, hasOpenRouterKey, t)}
               </span>
-              <strong className="readonly-value">{settings.cloudModel}</strong>
             </div>
             <label className="field-row">
               <span>{t("settings.cloudModel")}</span>
@@ -480,25 +420,25 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
                 ))}
               </select>
             </label>
-            <p className="settings-helper-inline">
+            <p className="settings-helper-inline helper-margin-top">
               {t(openRouterModelOptions.find((option) => option.id === settings.cloudModel)?.descriptionKey ?? "settings.openRouterAutoFreeModelDescription")}
             </p>
-            <p className="settings-helper-inline">{t("settings.openRouterFreeModelNote")}</p>
+            <p className="settings-helper-inline helper-margin-bottom">{t("settings.openRouterFreeModelNote")}</p>
             <label className="field-row">
               <span>{t("settings.openRouterApiKey")}</span>
               <input ref={openRouterKeyRef} type="password" placeholder="sk-or-v1-..." autoComplete="off" />
             </label>
             <div className="ai-settings-actions">
               <button className="button button--primary" onClick={() => void handleSaveOpenRouterKey()} type="button">
-                <KeyRound size={16} />
+                <KeyRound size={14} />
                 {t("settings.saveApiKey")}
               </button>
               <button className="button button--secondary" disabled={!hasOpenRouterKey || openRouterStatus === "checking"} onClick={() => void handleTestOpenRouter()} type="button">
-                {openRouterStatus === "checking" ? <Loader2 size={16} className="spin-icon" /> : <Check size={16} />}
+                {openRouterStatus === "checking" ? <Loader2 size={14} className="spin-icon" /> : <Check size={14} />}
                 {t("settings.testConnection")}
               </button>
               <button className="button button--danger" disabled={!hasOpenRouterKey} onClick={() => void handleDeleteOpenRouterKey()} type="button">
-                <Trash2 size={16} />
+                <Trash2 size={14} />
                 {t("settings.removeApiKey")}
               </button>
             </div>
@@ -508,142 +448,131 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
 
         {settings.aiProvider === "ollama" ? (
           <>
-        <div className="setup-status-row">
-          <span className={`status-pill status-pill--${aiStatusTone}`}>{aiStatusText}</span>
-          <button className="button button--secondary" disabled={isRefreshingModels} onClick={() => void refreshOllamaStatus()} type="button">
-            {isRefreshingModels ? <Loader2 size={16} className="spin-icon" /> : <RefreshCw size={16} />}
-            {t("settings.refreshModels")}
-          </button>
-        </div>
+            <div className="field-row">
+              <span>{t("task.sort.status")}</span>
+              <div className="status-row-actions">
+                <span className={`status-pill status-pill--${aiStatusTone}`}>{aiStatusText}</span>
+                <button className="button button--secondary" disabled={isRefreshingModels} onClick={() => void refreshOllamaStatus()} type="button">
+                  {isRefreshingModels ? <Loader2 size={14} className="spin-icon" /> : <RefreshCw size={14} />}
+                  {t("settings.refreshModels")}
+                </button>
+              </div>
+            </div>
 
-        {ollamaStatus?.status === "not-installed" ? (
-          <SetupCallout
-            icon={<Download size={18} />}
-            title={t("settings.ollamaMissingTitle")}
-            description={t("settings.ollamaMissingDescription")}
-            action={
-              <button className="button button--primary" onClick={() => void window.todoAI?.openOllamaDownload()} type="button">
-                <ExternalLink size={16} />
-                {t("settings.installOllama")}
-              </button>
-            }
-          />
-        ) : null}
+            {ollamaStatus?.status === "not-installed" ? (
+              <SetupCallout
+                icon={<Download size={15} />}
+                title={t("settings.ollamaMissingTitle")}
+                description={t("settings.ollamaMissingDescription")}
+                action={
+                  <button className="button button--primary" onClick={() => void window.todoAI?.openOllamaDownload()} type="button">
+                    <ExternalLink size={14} />
+                    {t("settings.installOllama")}
+                  </button>
+                }
+              />
+            ) : null}
 
-        {ollamaStatus?.status === "not-running" ? (
-          <SetupCallout
-            icon={<AlertTriangle size={18} />}
-            title={t("settings.ollamaNotRunningTitle")}
-            description={t("settings.ollamaNotRunningDescription")}
-            action={
-              <button className="button button--primary" onClick={() => void handleStartOllama()} type="button">
-                <PackageCheck size={16} />
-                {t("settings.startOllama")}
-              </button>
-            }
-          />
-        ) : null}
+            {ollamaStatus?.status === "not-running" ? (
+              <SetupCallout
+                icon={<AlertTriangle size={15} />}
+                title={t("settings.ollamaNotRunningTitle")}
+                description={t("settings.ollamaNotRunningDescription")}
+                action={
+                  <button className="button button--primary" onClick={() => void handleStartOllama()} type="button">
+                    <PackageCheck size={14} />
+                    {t("settings.startOllama")}
+                  </button>
+                }
+              />
+            ) : null}
 
-        <label className="field-row">
-          <span>{t("settings.provider")}</span>
-          <strong className="readonly-value">{t("settings.localAI")}</strong>
-        </label>
+            <label className="field-row">
+              <span>{t("settings.installedModel")}</span>
+              <select
+                disabled={!installedModels.length}
+                value={installedModels.some((model) => model.name === settings.localModel) ? settings.localModel : ""}
+                onChange={(event) => updateSettings({ localModel: event.target.value })}
+              >
+                {installedModels.length ? null : <option value="">{t("settings.noModels")}</option>}
+                {installedModels.map((model) => (
+                  <option key={model.name} value={model.name}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-        <label className="field-row">
-          <span>{t("settings.installedModel")}</span>
-          <select
-            disabled={!installedModels.length}
-            value={installedModels.some((model) => model.name === settings.localModel) ? settings.localModel : ""}
-            onChange={(event) => updateSettings({ localModel: event.target.value })}
-          >
-            {installedModels.length ? null : <option value="">{t("settings.noModels")}</option>}
-            {installedModels.map((model) => (
-              <option key={model.name} value={model.name}>
-                {model.name}
-              </option>
-            ))}
-          </select>
-        </label>
+            {missingSelectedModel ? (
+              <div className="settings-warning warning-margin-top">
+                <AlertTriangle size={14} />
+                <span>{t("settings.missingModelWarning")}</span>
+              </div>
+            ) : null}
 
-        {missingSelectedModel ? (
-          <div className="settings-warning">
-            <AlertTriangle size={16} />
-            <span>{t("settings.missingModelWarning")}</span>
-          </div>
-        ) : null}
+            {installedModels.length ? (
+              <div className="installed-model-list">
+                {installedModels.map((model) => {
+                  const selected = modelMatches(settings.localModel, model.name);
+                  const deleting = deletingModel === model.name;
+                  return (
+                    <article className="installed-model" key={model.name}>
+                      <div>
+                        <strong>{model.name}</strong>
+                        {model.size ? <span>{formatBytes(model.size)}</span> : null}
+                      </div>
+                      <div className="model-row-actions">
+                        <button className="button button--secondary" disabled={selected} onClick={() => updateSettings({ localModel: model.name })} type="button">
+                          <Check size={14} />
+                          {selected ? t("settings.selected") : t("settings.useModel")}
+                        </button>
+                        <button className="button button--delete-model" disabled={deleting} onClick={() => setConfirmAction({ type: "delete-model", modelName: model.name })} type="button">
+                          {deleting ? <Loader2 size={14} className="spin-icon" /> : <Trash2 size={14} />}
+                          {t("settings.deleteModel")}
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : null}
 
-        {installedModels.length ? (
-          <div className="installed-model-list">
-            {installedModels.map((model) => {
-              const selected = modelMatches(settings.localModel, model.name);
-              const deleting = deletingModel === model.name;
-              return (
-                <article className="installed-model" key={model.name}>
-                  <div>
-                    <strong>{model.name}</strong>
-                    {model.size ? <span>{formatBytes(model.size)}</span> : null}
-                  </div>
-                  <div className="model-row-actions">
-                    <button className="button button--secondary" disabled={selected} onClick={() => updateSettings({ localModel: model.name })} type="button">
-                      <Check size={16} />
-                      {selected ? t("settings.selected") : t("settings.useModel")}
-                    </button>
-                    <button className="button button--danger" disabled={deleting} onClick={() => setConfirmAction({ type: "delete-model", modelName: model.name })} type="button">
-                      {deleting ? <Loader2 size={16} className="spin-icon" /> : <Trash2 size={16} />}
-                      {t("settings.deleteModel")}
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        ) : null}
+            {modelActionMessage ? <p className={modelActionMessage === t("settings.modelDeleted") ? "settings-success" : "settings-error"}>{modelActionMessage}</p> : null}
 
-        {modelActionMessage ? <p className={modelActionMessage === t("settings.modelDeleted") ? "settings-success" : "settings-error"}>{modelActionMessage}</p> : null}
-
-        <div className="model-groups">
-          {recommendedModelGroups.map((group) => (
-            <div className="recommended-models smart-models" key={group.id}>
+            <div className="recommended-models">
               <div>
-                <strong>{t(group.titleKey)}</strong>
-                <p>{t(group.descriptionKey)}</p>
+                <strong>{t("settings.recommendedModels")}</strong>
+                <p>{t("settings.recommendedModelsDescription")}</p>
               </div>
               <div className="smart-model-list">
-                {group.models.map((model) => {
-                  const pullName = pullNames[model.name] ?? model.name;
+                {recommendedModelsJson.recommendedModels.map((model) => {
+                  const pullName = model.name;
                   const installed = installedModels.some((installedModel) => modelMatches(installedModel.name, pullName));
                   const selected = modelMatches(settings.localModel, pullName);
                   const isInstallingThis = pullState === "loading" && installingModel === pullName;
                   return (
-                    <article className="smart-model" key={`${group.id}-${model.name}`}>
-                      <div>
+                    <article className="smart-model" key={model.name}>
+                      <div className="smart-model-desc-col">
                         <div className="smart-model__header">
-                          <strong>{model.name}</strong>
-                          {selected ? <span className="status-pill status-pill--connected">{t("settings.selected")}</span> : installed ? <span className="status-pill">{t("settings.installed")}</span> : null}
+                          <strong>{model.label}</strong>
+                          <span className="model-tag">{model.name}</span>
+                          {model.recommended ? <span className="status-pill status-pill--connected status-pill--recommended-tag">{t("settings.recommended")}</span> : null}
+                          {model.isRussianRecommended && language === "ru" ? <span className="status-pill status-pill--ru-tag">RU</span> : null}
+                          {model.isExperimental ? <span className="status-pill status-pill--experimental-tag">{language === "ru" ? "Экспериментально" : "Experimental"}</span> : null}
+                          {selected ? <span className="status-pill status-pill--connected status-pill--compact">{t("settings.selected")}</span> : installed ? <span className="status-pill status-pill--compact">{t("settings.installed")}</span> : null}
                         </div>
-                        <p>{t(model.descriptionKey)}</p>
-                        <label className="model-pull-name">
-                          <span>{t("settings.pullName")}</span>
-                          <input
-                            value={pullName}
-                            onChange={(event) => setPullNames((current) => ({ ...current, [model.name]: event.target.value }))}
-                            disabled={pullState === "loading"}
-                          />
-                        </label>
+                        <p>
+                          {t(model.descriptionKey as any)}
+                        </p>
                       </div>
-                      {installed ? (
-                        <button className="button button--secondary" onClick={() => updateSettings({ localModel: pullName })} type="button">
-                          <Check size={16} />
-                          {selected ? t("settings.selected") : t("settings.useModel")}
-                        </button>
-                      ) : (
+                      {!installed && (
                         <button
                           className="button button--secondary"
                           disabled={pullState === "loading" || ollamaStatus?.status === "not-installed"}
                           onClick={() => void handlePullModel(pullName)}
                           type="button"
                         >
-                          {isInstallingThis ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
+                          {isInstallingThis ? <Loader2 size={14} className="spin-icon" /> : <Download size={14} />}
                           {t("settings.installModel")}
                         </button>
                       )}
@@ -652,112 +581,131 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
                 })}
               </div>
             </div>
-          ))}
-        </div>
 
-        {missingSelectedModel || !installedModels.length ? (
-          <div className="recommended-models">
-            <div>
-              <strong>{t("settings.recommendedModels")}</strong>
-              <p>{t("settings.recommendedModelsDescription")}</p>
-            </div>
-            <div className="model-install-list">
-              {recommendedModelGroups[0].models.map((model) => (
-                <button
-                  className="button button--secondary"
-                  disabled={pullState === "loading" || ollamaStatus?.status === "not-installed"}
-                  key={model.name}
-                  onClick={() => void handlePullModel(pullNames[model.name] ?? model.name)}
-                  type="button"
-                >
-                  {pullState === "loading" && installingModel === (pullNames[model.name] ?? model.name) ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
-                  {t("settings.installModel")} {pullNames[model.name] ?? model.name}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        {pullState !== "idle" ? (
-          <div className={`install-progress install-progress--${pullState}`}>
-            <div className="install-progress__header">
-              {pullState === "success" ? <CheckCircle2 size={16} /> : pullState === "error" ? <AlertTriangle size={16} /> : <Loader2 size={16} className="spin-icon" />}
-              <div>
-                <span>{pullState === "success" ? t("settings.modelInstalled") : pullState === "error" ? t("settings.modelInstallFailed") : t("settings.installingModel")}</span>
-                <small>{installingModel || pullProgress?.modelName || settings.localModel}</small>
+            {pullState !== "idle" ? (
+              <div className={`install-progress install-progress--${pullState}`}>
+                <div className="install-progress__header">
+                  {pullState === "success" ? <CheckCircle2 size={14} /> : pullState === "error" ? <AlertTriangle size={14} /> : <Loader2 size={14} className="spin-icon" />}
+                  <div>
+                    <span>{pullState === "success" ? t("settings.modelInstalled") : pullState === "error" ? t("settings.modelInstallFailed") : t("settings.installingModel")}</span>
+                    <small>{installingModel || pullProgress?.modelName || settings.localModel}</small>
+                  </div>
+                </div>
+                <ProgressText payload={pullProgress} fallback={pullMessage} t={t} />
+                <div className="install-progress__actions">
+                  {pullProgress?.details ? (
+                    <button className="text-button" onClick={() => setShowTechnicalDetails((value) => !value)} type="button">
+                      {showTechnicalDetails ? t("settings.hideTechnicalDetails") : t("settings.showTechnicalDetails")}
+                    </button>
+                  ) : null}
+                  {pullState === "loading" ? (
+                    <button className="button button--secondary" onClick={() => void window.todoAI?.cancelOllamaPull()} type="button">
+                      {t("settings.cancel")}
+                    </button>
+                  ) : (
+                    <button className="button button--secondary" onClick={() => setPullState("idle")} type="button">
+                      {t("settings.close")}
+                    </button>
+                  )}
+                </div>
+                {showTechnicalDetails && pullProgress?.details ? <pre className="install-progress__details">{pullProgress.details}</pre> : null}
               </div>
-            </div>
-            <ProgressText payload={pullProgress} fallback={pullMessage} t={t} />
-            <div className="install-progress__actions">
-              {pullProgress?.details ? (
-                <button className="text-button" onClick={() => setShowTechnicalDetails((value) => !value)} type="button">
-                  {showTechnicalDetails ? t("settings.hideTechnicalDetails") : t("settings.showTechnicalDetails")}
-                </button>
-              ) : null}
-              {pullState === "loading" ? (
-                <button className="button button--secondary" onClick={() => void window.todoAI?.cancelOllamaPull()} type="button">
-                  {t("settings.cancel")}
-                </button>
-              ) : (
-                <button className="button button--secondary" onClick={() => setPullState("idle")} type="button">
-                  {t("settings.close")}
-                </button>
-              )}
-            </div>
-            {showTechnicalDetails && pullProgress?.details ? <pre className="install-progress__details">{pullProgress.details}</pre> : null}
-          </div>
-        ) : null}
+            ) : null}
 
-        <button className="text-button" onClick={() => setShowAdvancedAI((value) => !value)} type="button">
-          {showAdvancedAI ? t("settings.hideAdvanced") : t("settings.showAdvanced")}
-        </button>
+            <div className="advanced-toggle-spacing">
+              <button className="text-button" onClick={() => setShowAdvancedAI((value) => !value)} type="button">
+                {showAdvancedAI ? t("settings.hideAdvanced") : t("settings.showAdvanced")}
+              </button>
+            </div>
 
-        {showAdvancedAI ? (
-          <div className="advanced-settings">
-            <label className="field-row">
-              <span>{t("settings.baseUrl")}</span>
-              <input value={settings.aiBaseUrl} onChange={(event) => updateSettings({ aiBaseUrl: event.target.value })} placeholder="http://localhost:11434" />
-            </label>
-            <label className="field-row">
-              <span>{t("settings.customModel")}</span>
-              <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="llama3.1:latest" />
-            </label>
-            <button className="button button--secondary" onClick={() => updateSettings({ localModel: customModel.trim() || settings.localModel })} type="button">
-              {t("settings.useCustomModel")}
-            </button>
-          </div>
-        ) : null}
+            {showAdvancedAI ? (
+              <div className="advanced-settings">
+                <label className="field-row">
+                  <span>{t("settings.baseUrl")}</span>
+                  <input value={settings.aiBaseUrl} onChange={(event) => updateSettings({ aiBaseUrl: event.target.value })} placeholder="http://localhost:11434" />
+                </label>
+                <label className="field-row">
+                  <span>{t("settings.customModel")}</span>
+                  <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="qwen3.5:9b" />
+                </label>
+                <div className="advanced-settings-actions">
+                  <button className="button button--secondary" onClick={() => updateSettings({ localModel: customModel.trim() || settings.localModel })} type="button">
+                    {t("settings.useCustomModel")}
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </>
         ) : null}
       </SettingsSection>
 
       <SettingsSection icon={CalendarClock} title={t("settings.schedule")} description={t("settings.scheduleDescription")}>
         <div className="availability-editor">
-          <input value={scheduleDraft.label} onChange={(event) => setScheduleDraft((current) => ({ ...current, label: event.target.value }))} placeholder={t("settings.scheduleLabelPlaceholder")} />
-          <div className="weekday-picker">
-            {weekdayNumbers.map((day) => (
-              <button className={`weekday-chip ${scheduleDraft.weekdays.includes(day) ? "weekday-chip--active" : ""}`} key={day} onClick={() => toggleScheduleWeekday(day)} type="button">
-                {getWeekdayShort(day, t)}
-              </button>
-            ))}
+          <div className="availability-editor__field">
+            <span>{t("task.title")}</span>
+            <input
+              className="availability-editor__input"
+              value={scheduleDraft.label}
+              onChange={(event) => setScheduleDraft((current) => ({ ...current, label: event.target.value }))}
+              placeholder={t("settings.scheduleLabelPlaceholder")}
+            />
           </div>
-          <div className="task-modal__grid">
-            <input value={scheduleDraft.startTime} onChange={(event) => setScheduleDraft((current) => ({ ...current, startTime: event.target.value }))} type="time" aria-label={t("settings.scheduleStart")} />
-            <input value={scheduleDraft.endTime} onChange={(event) => setScheduleDraft((current) => ({ ...current, endTime: event.target.value }))} type="time" aria-label={t("settings.scheduleEnd")} />
+
+          <div className="availability-editor__weekdays">
+            <span className="availability-editor__label-text">{t("settings.scheduleDays")}</span>
+            <div className="weekday-picker">
+              {weekdayNumbers.map((day) => (
+                <button
+                  className={`weekday-chip ${scheduleDraft.weekdays.includes(day) ? "weekday-chip--active" : ""}`}
+                  key={day}
+                  onClick={() => toggleScheduleWeekday(day)}
+                  type="button"
+                >
+                  {getWeekdayShort(day, t)}
+                </button>
+              ))}
+            </div>
           </div>
-          <button className="button button--primary" disabled={!scheduleDraft.weekdays.length || scheduleDraft.startTime >= scheduleDraft.endTime} onClick={addAvailabilityBlock} type="button">
-            {t("settings.addUnavailableBlock")}
-          </button>
+
+          <div className="availability-editor__times">
+            <label className="availability-editor__time-field">
+              <span>{t("settings.scheduleStart")}</span>
+              <input
+                value={scheduleDraft.startTime}
+                onChange={(event) => setScheduleDraft((current) => ({ ...current, startTime: event.target.value }))}
+                type="time"
+              />
+            </label>
+            <label className="availability-editor__time-field">
+              <span>{t("settings.scheduleEnd")}</span>
+              <input
+                value={scheduleDraft.endTime}
+                onChange={(event) => setScheduleDraft((current) => ({ ...current, endTime: event.target.value }))}
+                type="time"
+              />
+            </label>
+          </div>
+
+          <div className="schedule-editor-actions">
+            <button
+              className="button button--primary availability-editor__add-btn"
+              disabled={!scheduleDraft.weekdays.length || scheduleDraft.startTime >= scheduleDraft.endTime}
+              onClick={addAvailabilityBlock}
+              type="button"
+            >
+              {t("settings.addUnavailableBlock")}
+            </button>
+          </div>
         </div>
-        <div className="installed-model-list">
+        <div className="installed-model-list list-margin-top">
           {settings.availabilityBlocks.length ? settings.availabilityBlocks.map((block) => (
             <article className="installed-model" key={block.id}>
               <div>
                 <strong>{block.label}</strong>
-                <span>{block.weekdays.map((day) => getWeekdayShort(day, t)).join(", ")} · {block.startTime}-{block.endTime}</span>
+                <span className="availability-block-time">{block.weekdays.map((day) => getWeekdayShort(day, t)).join(", ")} · {block.startTime}-{block.endTime}</span>
               </div>
-              <button className="button button--danger" onClick={() => deleteAvailabilityBlock(block.id)} type="button">
-                <Trash2 size={16} />
+              <button className="button button--secondary button--delete-model" onClick={() => deleteAvailabilityBlock(block.id)} type="button">
+                <Trash2 size={14} />
                 {t("settings.delete")}
               </button>
             </article>
@@ -765,7 +713,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         </div>
       </SettingsSection>
 
-      <SettingsSection icon={Info} title={t("settings.aboutTitle")} description={t("settings.aboutDescription")}>
+      <SettingsSection icon={Info} title={t("settings.aboutTitle")}>
         <div className="about-grid">
           <div className="about-row">
             <span>{t("settings.version")}</span>
@@ -778,22 +726,22 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         </div>
         <div className="ai-settings-actions">
           <button className="button button--secondary" onClick={() => updateSettings({ onboardingCompleted: false })} type="button">
-            <PlayCircle size={16} />
+            <PlayCircle size={14} />
             {t("settings.runOnboardingAgain")}
           </button>
           <button className="button button--secondary" disabled={isCheckingUpdates || updateStatus.status === "checking"} onClick={() => void handleCheckForUpdates()} type="button">
-            {isCheckingUpdates || updateStatus.status === "checking" ? <Loader2 size={16} className="spin-icon" /> : <RefreshCw size={16} />}
+            {isCheckingUpdates || updateStatus.status === "checking" ? <Loader2 size={14} className="spin-icon" /> : <RefreshCw size={14} />}
             {t("settings.checkForUpdates")}
           </button>
           {updateStatus.status === "available" ? (
             <button className="button button--primary" onClick={() => void handleDownloadUpdate()} type="button">
-              <Download size={16} />
+              <Download size={14} />
               {t("settings.downloadUpdate")}
             </button>
           ) : null}
           {updateStatus.status === "downloaded" ? (
             <button className="button button--primary" onClick={() => void window.todoAI?.installUpdate()} type="button">
-              <RotateCcw size={16} />
+              <RotateCcw size={14} />
               {t("settings.restartToInstall")}
             </button>
           ) : null}
@@ -801,7 +749,7 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         {updateStatus.message ? <p className="settings-helper-inline">{updateStatus.message}</p> : null}
       </SettingsSection>
 
-      <SettingsSection icon={Bell} title={t("settings.notifications")} description={t("settings.notificationsSectionDescription")}>
+      <SettingsSection icon={Bell} title={t("settings.notifications")}>
         <label className="toggle-row">
           <span>
             <strong>{t("settings.enableNotifications")}</strong>
@@ -824,14 +772,14 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         </label>
         <div className="ai-settings-actions">
           <button className="button button--secondary" disabled={!settings.notifications} onClick={() => void handleTestNotification()} type="button">
-            <Bell size={16} />
+            <Bell size={14} />
             {t("settings.testNotification")}
           </button>
           {notificationStatus ? <span className="settings-helper-inline">{notificationStatus}</span> : null}
         </div>
       </SettingsSection>
 
-      <SettingsSection icon={Monitor} title={t("settings.notificationsStartup")} description={t("settings.notificationsStartupDescription")}>
+      <SettingsSection icon={Monitor} title={t("settings.notificationsStartup")}>
         <label className="toggle-row">
           <span>
             <strong>{t("settings.autoPlanDay")}</strong>
@@ -849,14 +797,14 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         </label>
       </SettingsSection>
 
-      <SettingsSection icon={Database} title={t("settings.data")} description={t("settings.dataDescription")}>
+      <SettingsSection icon={Database} title={t("settings.data")}>
         <div className="data-actions">
           <button className="button button--secondary" disabled={cacheStatus === "loading"} onClick={() => setConfirmAction({ type: "cache" })} type="button">
-            <Download size={16} />
+            <Download size={14} />
             {cacheStatus === "loading" ? t("settings.clearingCache") : t("settings.clearCache")}
           </button>
           <button className="button button--secondary" onClick={() => setConfirmAction({ type: "history" })} type="button">
-            <Download size={16} />
+            <Download size={14} />
             {t("settings.clearAiHistory")}
           </button>
         </div>
@@ -897,7 +845,7 @@ function SetupCallout({ icon, title, description, action }: { icon: ReactNode; t
   return (
     <div className="setup-callout">
       <span className="setup-callout__icon">{icon}</span>
-      <div>
+      <div className="callout-text-wrapper">
         <strong>{title}</strong>
         <p>{description}</p>
       </div>
@@ -938,19 +886,17 @@ function SettingsSection({
 }: {
   icon: typeof Monitor;
   title: string;
-  description: string;
+  description?: string;
   children: ReactNode;
 }) {
   return (
     <section className="settings-section">
       <div className="settings-section__header">
-        <div className="settings-section__icon">
-          <Icon size={18} />
-        </div>
-        <div>
+        <div className="settings-section__title-row">
+          <Icon size={16} className="settings-section__icon" />
           <h2>{title}</h2>
-          <p>{description}</p>
         </div>
+        {description ? <p className="settings-section__description">{description}</p> : null}
       </div>
       <div className="settings-section__body">{children}</div>
     </section>
@@ -976,9 +922,7 @@ function modelMatches(installedModel: string, selectedModel: string) {
   return installedModel === selectedModel || installedModel.replace(/:latest$/, "") === selectedModel || selectedModel.replace(/:latest$/, "") === installedModel;
 }
 
-function getDefaultPullNames() {
-  return Object.fromEntries(recommendedModelGroups.flatMap((group) => group.models.map((model) => [model.name, model.name])));
-}
+
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return "0 B";

@@ -18,7 +18,9 @@ interface OnboardingFlowProps {
   onComplete: () => void;
 }
 
-const onboardingModels = ["llama3.1:latest", "llama3.2:latest", "mistral:latest"];
+import recommendedModelsJson from "../../electron/recommended_models.json";
+
+const onboardingModels = recommendedModelsJson.recommendedModels.map((m) => m.name);
 const openRouterModelOptions = [
   {
     id: "openrouter/free",
