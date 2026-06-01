@@ -10,6 +10,11 @@ import { TelegramBridge, type TelegramBridgeSettings } from "./telegramService";
 
 const isDev = !app.isPackaged;
 const ollamaDownloadUrl = "https://ollama.com/download";
+const allowedExternalLinks = new Set([
+  ollamaDownloadUrl,
+  "https://openrouter.ai/settings/keys",
+  "https://t.me/BotFather",
+]);
 const appName = "Aevum";
 const openRouterService = "Aevum";
 const legacyOpenRouterService = ["Todo", "AI"].join(" ");
@@ -110,6 +115,7 @@ app.whenReady().then(() => {
   app.setAppUserModelId("com.kamartur.aevum");
   ipcMain.handle("app:get-theme", () => nativeTheme.shouldUseDarkColors ? "dark" : "light");
   ipcMain.handle("app:get-version", () => app.getVersion());
+  ipcMain.handle("app:open-external-link", async (_event, url?: unknown) => openExternalLink(url));
   ipcMain.handle("app:clear-cache", async () => {
     await session.defaultSession.clearCache();
     await session.defaultSession.clearStorageData({
@@ -128,8 +134,7 @@ app.whenReady().then(() => {
     return checkOllamaStatus(validateModelName(selectedModel, "qwen3.5:9b"), validateBaseUrl(baseUrl));
   });
   ipcMain.handle("ollama:open-download", async () => {
-    await shell.openExternal(ollamaDownloadUrl);
-    return { ok: true };
+    return openExternalLink(ollamaDownloadUrl);
   });
   ipcMain.handle("ollama:start", async () => startOllama());
   ipcMain.handle("ollama:pull-model", async (event, modelName?: unknown) => {
@@ -281,6 +286,14 @@ function showTaskNotification({ title, body }: { title: string; body: string }) 
   });
   notification.show();
   return { ok: true, supported: true };
+}
+
+async function openExternalLink(value: unknown) {
+  if (typeof value !== "string" || !allowedExternalLinks.has(value)) {
+    return { ok: false, status: "blocked" };
+  }
+  await shell.openExternal(value);
+  return { ok: true };
 }
 
 function readNotificationSettings(value: unknown) {

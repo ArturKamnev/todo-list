@@ -13,12 +13,31 @@ import { VisualizationView } from "./components/VisualizationView";
 import { initialMessages } from "./data/sampleData";
 import { useTheme } from "./hooks/useTheme";
 import { useI18n } from "./i18n";
-import { applyAssistantAction } from "./services/aiActions";
-import { AIProviderError, breakDownTaskWithAI, chatWithAssistant, type AssistantAction } from "./services/aiService";
+import {
+  cancelAIActionProposal,
+  confirmAIActionProposal,
+  createAIActionProposal,
+  createAIActionProposalLedger,
+  createAIActionUndoConflictAuditEntry,
+  createUndoAIActionTransaction,
+  type AIActionAuditEntry,
+  type AIActionConfirmResult,
+  type AIActionProposal,
+  type AIActionUndoResult,
+} from "./services/aiActions";
+import {
+  appendAIActionAuditEntry,
+  loadAIActionAuditLog,
+  markAIActionAuditEntryConflicted,
+  markAIActionAuditEntryUndone,
+  saveAIActionAuditLog,
+} from "./services/aiActionAuditStore";
+import { AIProviderError, breakDownTaskWithAI, chatWithAssistant, getCleanLocalizedErrorMessage, type AssistantAction } from "./services/aiService";
 import { loadProjects, loadTasks, saveProjects, saveTasks } from "./services/localStore";
 import type { AIMode, AssistantMessage, Project, ReminderOffsetMinutes, SortMode, Task, TaskDraft, TaskStatus, UserSettings, ViewId } from "./types";
 import { formatScheduleLabel, getTodayISO, getTomorrowISO, isScheduledAfterToday, isScheduledBeforeToday, isScheduledToday } from "./utils/date";
 import { createProjectId, createTaskId } from "./utils/id";
+import { getCategoryIdFromView } from "./utils/navigation";
 import { calculateNextRepeatAt, createNextRecurringTask } from "./utils/recurrence";
 
 const defaultSettings: UserSettings = {
@@ -82,6 +101,7 @@ export function App() {
   const [tasks, setTasks] = useState<Task[]>(loadTasks);
   const [appProjects, setAppProjects] = useState<Project[]>(loadProjects);
   const [messages, setMessages] = useState<AssistantMessage[]>(loadMessages);
+  const [aiActionAuditLog, setAiActionAuditLog] = useState<AIActionAuditEntry[]>(loadAIActionAuditLog);
   const [settings, setSettings] = useState<UserSettings>(() => loadSettings(theme, language));
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
@@ -93,9 +113,14 @@ export function App() {
   const [isLoading] = useState(false);
   const tasksRef = useRef(tasks);
   const projectsRef = useRef(appProjects);
+  const aiActionAuditLogRef = useRef(aiActionAuditLog);
   const settingsRef = useRef(settings);
-  const telegramProposalsRef = useRef(new Map<string, { action: AssistantAction; expiresAt: number }>());
+  const proposalLedgerRef = useRef(createAIActionProposalLedger());
+  const telegramProposalsRef = useRef(new Map<string, AIActionProposal>());
   const telegramTemplateWizardsRef = useRef(new Map<number, TelegramTemplateWizard>());
+  const activeCategoryId = getCategoryIdFromView(activeView);
+  const activeCategory = activeCategoryId ? appProjects.find((project) => project.id === activeCategoryId) : undefined;
+  const activeCategoryTaskCount = activeCategoryId ? tasks.filter((task) => task.projectId === activeCategoryId).length : 0;
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -104,6 +129,10 @@ export function App() {
   useEffect(() => {
     projectsRef.current = appProjects;
   }, [appProjects]);
+
+  useEffect(() => {
+    aiActionAuditLogRef.current = aiActionAuditLog;
+  }, [aiActionAuditLog]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -128,6 +157,16 @@ export function App() {
   useEffect(() => {
     saveProjects(appProjects);
   }, [appProjects]);
+
+  useEffect(() => {
+    saveAIActionAuditLog(aiActionAuditLog);
+  }, [aiActionAuditLog]);
+
+  useEffect(() => {
+    if (activeCategoryId && !activeCategory) {
+      setActiveView("projects");
+    }
+  }, [activeCategory, activeCategoryId]);
 
   useEffect(() => {
     void window.todoAI?.scheduleTaskNotifications(tasks, {
@@ -304,6 +343,51 @@ export function App() {
     onEditTask: openEditTask,
   };
 
+  const commitAITransaction = useCallback((result: Extract<AIActionConfirmResult, { ok: true }> | Extract<AIActionUndoResult, { ok: true }>) => {
+    tasksRef.current = result.transaction.after.tasks;
+    projectsRef.current = result.transaction.after.projects;
+    setTasks(result.transaction.after.tasks);
+    setAppProjects(result.transaction.after.projects);
+  }, []);
+
+  const confirmAIProposal = useCallback((proposal: AIActionProposal): AIActionConfirmResult => {
+    const result = confirmAIActionProposal(proposal, { tasks: tasksRef.current, projects: projectsRef.current }, { ledger: proposalLedgerRef.current });
+    if (!result.ok) return result;
+    commitAITransaction(result);
+    setAiActionAuditLog((current) => appendAIActionAuditEntry(current, result.auditEntry));
+    return result;
+  }, [commitAITransaction]);
+
+  const cancelAIProposal = useCallback((proposal: AIActionProposal) => {
+    cancelAIActionProposal(proposal, proposalLedgerRef.current);
+  }, []);
+
+  const undoAIAction = useCallback((transactionId: string): AIActionUndoResult => {
+    const entry = aiActionAuditLogRef.current.find((item) => item.transactionId === transactionId);
+    if (!entry) return { ok: false, reason: "unsafe_undo" };
+
+    const result = createUndoAIActionTransaction(entry, { tasks: tasksRef.current, projects: projectsRef.current });
+    if (!result.ok) {
+      const conflictEntry = createAIActionUndoConflictAuditEntry(entry, result.reason);
+      setAiActionAuditLog((current) =>
+        appendAIActionAuditEntry(
+          markAIActionAuditEntryConflicted(current, entry.transactionId, result.reason),
+          conflictEntry,
+        ),
+      );
+      return result;
+    }
+
+    commitAITransaction(result);
+    setAiActionAuditLog((current) =>
+      appendAIActionAuditEntry(
+        markAIActionAuditEntryUndone(current, entry.transactionId),
+        result.auditEntry,
+      ),
+    );
+    return result;
+  }, [commitAITransaction]);
+
   useEffect(() => {
     void window.todoAI?.updateTelegramSettings({
       enabled: settings.telegramAssistantEnabled,
@@ -361,30 +445,29 @@ export function App() {
         return;
       }
 
-      const intent = resolveTelegramIntent(text);
-      if (intent.kind === "ambiguous") {
-        await respond({ ok: true, kind: "message", text: telegramCopy(settingsRef.current.language, "ambiguous") });
-        return;
-      }
-
       const effectiveSettings = await getTelegramAISettings(settingsRef.current);
       if ("error" in effectiveSettings) {
         await respond({ ok: false, text: effectiveSettings.error });
         return;
       }
 
-      const mode = intent.kind === "mode" ? intent.mode : null;
-      const result = await chatWithAssistant(text, tasksRef.current, effectiveSettings.settings, mode, projectsRef.current);
+      const result = await chatWithAssistant(text, tasksRef.current, effectiveSettings.settings, null, projectsRef.current);
       if (!result.action) {
         await respond({ ok: true, kind: "message", text: sanitizeTelegramReply(result.message.content) });
         return;
       }
 
       const action = sanitizeTelegramAction(result.action, projectsRef.current);
-      const preview = renderTelegramActionPreview(action, tasksRef.current, projectsRef.current, settingsRef.current);
-      const proposalId = createTelegramProposalId();
-      telegramProposalsRef.current.set(proposalId, { action, expiresAt: Date.now() + 10 * 60_000 });
-      await respond({ ok: true, kind: "proposal", proposalId, text: preview });
+      const proposalResult = createAIActionProposal(action, "telegram", { tasks: tasksRef.current, projects: projectsRef.current }, { ttlMs: 10 * 60_000 });
+      if (!proposalResult.ok) {
+        await respond({ ok: false, text: telegramCopy(settingsRef.current.language, "applyFailed") });
+        return;
+      }
+      telegramProposalsRef.current.set(proposalResult.proposal.id, proposalResult.proposal);
+      const messageContent = sanitizeTelegramReply(result.message.content);
+      const preview = renderTelegramActionPreview(proposalResult.proposal.action, tasksRef.current, projectsRef.current, settingsRef.current);
+      const combinedText = messageContent ? `${messageContent}\n\n${preview}` : preview;
+      await respond({ ok: true, kind: "proposal", proposalId: proposalResult.proposal.id, text: combinedText });
     } catch (error) {
       await respond({ ok: false, text: normalizeTelegramError(error, settingsRef.current.language) });
     }
@@ -402,7 +485,7 @@ export function App() {
   async function handleTelegramDecision(payload: TelegramDecisionRequestPayload) {
     const respond = (response: TelegramRendererResponse) => window.todoAI?.sendTelegramRendererResponse({ id: payload.id, response });
     const proposal = telegramProposalsRef.current.get(payload.proposalId);
-    if (!proposal || proposal.expiresAt <= Date.now()) {
+    if (!proposal) {
       telegramProposalsRef.current.delete(payload.proposalId);
       await respond({ ok: false, text: telegramCopy(settingsRef.current.language, "expired") });
       return;
@@ -410,22 +493,15 @@ export function App() {
 
     telegramProposalsRef.current.delete(payload.proposalId);
     if (payload.decision === "cancel") {
+      cancelAIProposal(proposal);
       await respond({ ok: true, kind: "message", text: telegramCopy(settingsRef.current.language, "canceled") });
       return;
     }
 
-    const actionResult = applyAssistantAction(proposal.action, {
-      addProject: () => projectsRef.current[0] ?? { id: "workspace", name: "Workspace", color: "var(--project-sage)", description: "" },
-      addTask,
-      deleteTask: deleteTaskDirect,
-      projects: projectsRef.current,
-      setTaskStatus,
-      tasks: tasksRef.current,
-      updateTask,
-    });
+    const actionResult = confirmAIProposal(proposal);
     await respond(actionResult.ok
       ? { ok: true, kind: "message", text: telegramCopy(settingsRef.current.language, "applied") }
-      : { ok: false, text: telegramCopy(settingsRef.current.language, "applyFailed") });
+      : { ok: false, text: telegramCopy(settingsRef.current.language, telegramFailureCopyKey(actionResult.reason)) });
   }
 
   function handleTelegramTemplateMessage(chatId: number, text: string, tasksValue: Task[], projectsValue: Project[], settingsValue: UserSettings): TelegramRendererResponse {
@@ -614,10 +690,14 @@ export function App() {
         tags: [],
       }],
     };
-    const proposalId = createTelegramProposalId();
-    telegramProposalsRef.current.set(proposalId, { action, expiresAt: Date.now() + 10 * 60_000 });
+    const proposalResult = createAIActionProposal(action, "telegram", { tasks: tasksValue, projects: projectsValue }, { ttlMs: 10 * 60_000 });
+    if (!proposalResult.ok) {
+      telegramTemplateWizardsRef.current.delete(chatId);
+      return { ok: false, text: telegramCopy(settingsValue.language, "applyFailed") };
+    }
+    telegramProposalsRef.current.set(proposalResult.proposal.id, proposalResult.proposal);
     telegramTemplateWizardsRef.current.delete(chatId);
-    return { ok: true, kind: "proposal", proposalId, text: renderTelegramActionPreview(action, tasksValue, projectsValue, settingsValue) };
+    return { ok: true, kind: "proposal", proposalId: proposalResult.proposal.id, text: renderTelegramActionPreview(proposalResult.proposal.action, tasksValue, projectsValue, settingsValue) };
   }
 
   return (
@@ -657,6 +737,20 @@ export function App() {
           />
         )}
 
+        {activeCategory && (
+          <TaskList
+            {...taskListProps}
+            tasks={tasks}
+            categoryFilter={activeCategory.id}
+            setCategoryFilter={setCategoryFilter}
+            timeFormat={settings.timeFormat}
+            viewMode="category"
+            activeCategory={activeCategory}
+            hideCategoryFilter
+            totalCount={activeCategoryTaskCount}
+          />
+        )}
+
         {activeView === "projects" && (
           <ProjectsView
             projects={appProjects}
@@ -674,12 +768,11 @@ export function App() {
 
         {activeView === "assistant" && (
           <AIAssistantPanel
-            addProject={addProject}
-            addTask={addTask}
+            aiActionAuditLog={aiActionAuditLog}
             messages={messages}
-            onDeleteTask={deleteTaskDirect}
-            onSetTaskStatus={setTaskStatus}
-            onUpdateTask={updateTask}
+            onCancelAIProposal={cancelAIProposal}
+            onConfirmAIProposal={confirmAIProposal}
+            onUndoAIAction={undoAIAction}
             projects={appProjects}
             setMessages={setMessages}
             settings={settings}
@@ -975,15 +1068,27 @@ function renderTelegramReadOnlyAnswer(text: string, tasks: Task[], projects: Pro
 }
 
 function sanitizeTelegramAction(action: AssistantAction, projects: Project[]): AssistantAction {
-  if (action.type !== "create_tasks") return action;
-  const knownProjectNames = new Set(projects.map((project) => project.name.toLowerCase()));
-  return {
-    ...action,
-    tasks: action.tasks.map((task) => ({
-      ...task,
-      projectName: task.projectName && knownProjectNames.has(task.projectName.toLowerCase()) ? task.projectName : undefined,
-    })),
-  };
+  if (action.type === "create_tasks") {
+    const knownProjectNames = new Set(projects.map((project) => project.name.toLowerCase()));
+    return {
+      ...action,
+      tasks: action.tasks.map((task) => ({
+        ...task,
+        projectName: task.projectName && knownProjectNames.has(task.projectName.toLowerCase()) ? task.projectName : undefined,
+      })),
+    };
+  }
+  if (action.type === "batch_action") {
+    const knownProjectNames = new Set(projects.map((project) => project.name.toLowerCase()));
+    return {
+      ...action,
+      tasksToCreate: action.tasksToCreate?.map((task) => ({
+        ...task,
+        projectName: task.projectName && knownProjectNames.has(task.projectName.toLowerCase()) ? task.projectName : undefined,
+      })),
+    };
+  }
+  return action;
 }
 
 function renderTelegramActionPreview(action: AssistantAction, tasks: Task[], projects: Project[], settings: UserSettings) {
@@ -1004,6 +1109,50 @@ function renderTelegramActionPreview(action: AssistantAction, tasks: Task[], pro
       }),
       settings.language === "ru" ? "Применить это расписание?" : "Apply this schedule?",
     ].join("\n");
+  }
+  if (action.type === "batch_action") {
+    const lines: string[] = [];
+    lines.push(settings.language === "ru" ? "Предложение выполнить пакет действий:" : "Proposed batch actions:");
+    
+    if (action.tasksToCreate && action.tasksToCreate.length > 0) {
+      lines.push(settings.language === "ru" ? "Создать:" : "Create:");
+      for (const task of action.tasksToCreate) {
+        lines.push(`• ${task.title}${task.scheduledAt ? ` — ${formatScheduleLabel(task.scheduledAt, labels, settings.language, settings.timeFormat)}` : ""}`);
+      }
+    }
+    
+    if (action.scheduleChanges && action.scheduleChanges.length > 0) {
+      lines.push(settings.language === "ru" ? "Запланировать:" : "Schedule:");
+      for (const change of action.scheduleChanges) {
+        const task = tasks.find((item) => item.id === change.taskId);
+        lines.push(`• ${task?.title ?? telegramCopy(settings.language, "task")} — ${formatScheduleLabel(change.scheduledAt, labels, settings.language, settings.timeFormat)}`);
+      }
+    }
+    
+    if (action.manageOperations && action.manageOperations.length > 0) {
+      lines.push(settings.language === "ru" ? "Изменить:" : "Manage:");
+      for (const operation of action.manageOperations) {
+        const task = tasks.find((item) => item.id === operation.taskId);
+        const title = task?.title ?? telegramCopy(settings.language, "task");
+        if (operation.operation === "delete") {
+          lines.push(settings.language === "ru" ? `• Удалить: ${title}` : `• Delete: ${title}`);
+        } else if (operation.operation === "set_status") {
+          const status = operation.status === "completed"
+            ? (settings.language === "ru" ? "выполнено" : "completed")
+            : (settings.language === "ru" ? "активно" : "active");
+          lines.push(`• ${title}: ${status}`);
+        } else {
+          const fields = Object.entries(operation.changes)
+            .map(([key, value]) => formatTelegramManageField(key, value, task, projects, settings, labels))
+            .filter(Boolean)
+            .join(", ");
+          lines.push(`• ${title}: ${fields}`);
+        }
+      }
+    }
+    
+    lines.push(settings.language === "ru" ? "Применить эти изменения?" : "Apply these changes?");
+    return lines.join("\n");
   }
 
   return [
@@ -1089,12 +1238,7 @@ function formatTelegramManageField(
 }
 
 function normalizeTelegramError(error: unknown, language: UserSettings["language"]) {
-  if (error instanceof AIProviderError) {
-    if (error.code === "openrouter_missing_key") return telegramCopy(language, "openRouterMissing");
-    if (error.code === "ollama_not_running" || error.code === "wrong_base_url") return telegramCopy(language, "ollamaUnavailable");
-    if (error.code === "model_missing") return telegramCopy(language, "ollamaModelMissing");
-  }
-  return telegramCopy(language, "error");
+  return getCleanLocalizedErrorMessage(error, language);
 }
 
 function sanitizeTelegramReply(value: string) {
@@ -1121,13 +1265,16 @@ function getTomorrowDate() {
   return `${year}-${month}-${day}`;
 }
 
-function createTelegramProposalId() {
-  return `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+function telegramFailureCopyKey(reason: string) {
+  if (reason === "expired" || reason === "replayed") return "expired";
+  if (reason === "stale") return "stale";
+  return "applyFailed";
 }
 
 function telegramCopy(language: UserSettings["language"], key: string) {
   const ru = language === "ru";
   const copy: Record<string, [string, string]> = {
+    stale: ["Tasks changed after this preview. Send the request again and review a fresh proposal.", "\u0417\u0430\u0434\u0430\u0447\u0438 \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c \u043f\u043e\u0441\u043b\u0435 \u043f\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0441\u043d\u043e\u0432\u0430 \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043d\u043e\u0432\u043e\u0435 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u0435."],
     empty: ["Send a text request.", "Отправьте текстовый запрос."],
     ambiguous: ["Please clarify what you want me to do with your tasks.", "Уточните, что нужно сделать с задачами."],
     expired: ["This confirmation expired. Send the request again.", "Это подтверждение истекло. Отправьте запрос снова."],

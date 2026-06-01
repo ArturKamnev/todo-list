@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("todoAI", {
   getSystemTheme: (): Promise<"dark" | "light"> => ipcRenderer.invoke("app:get-theme"),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke("app:get-version"),
+  openExternalLink: (url: string): Promise<{ ok: boolean; status?: string }> => ipcRenderer.invoke("app:open-external-link", url),
   clearAppCache: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("app:clear-cache"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),

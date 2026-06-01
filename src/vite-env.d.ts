@@ -4,6 +4,7 @@ interface Window {
   todoAI?: {
     getSystemTheme: () => Promise<"dark" | "light">;
     getAppVersion: () => Promise<string>;
+    openExternalLink: (url: string) => Promise<{ ok: boolean; status?: string }>;
     clearAppCache: () => Promise<{ ok: boolean }>;
     checkForUpdates: () => Promise<UpdateCheckResult>;
     downloadUpdate: () => Promise<UpdateCheckResult & { ok?: boolean }>;
@@ -101,7 +102,7 @@ type OpenRouterResult = {
   httpStatus?: number;
 };
 
-type TelegramBridgeStatus = "disabled" | "connecting" | "connected" | "invalid-token" | "not-paired" | "webhook-conflict" | "error";
+type TelegramBridgeStatus = "disabled" | "connecting" | "connected" | "reconnecting" | "invalid-token" | "not-paired" | "webhook-conflict" | "error";
 type TelegramInteractionMode = "template" | "ai";
 
 type TelegramStatusResult = {

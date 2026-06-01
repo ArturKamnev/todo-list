@@ -27,6 +27,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { AvailabilityBlock, AIProvider, Language, ReminderOffsetMinutes, ThemeMode, TimeFormat, UserSettings } from "../types";
 import { createAvailabilityId } from "../utils/id";
+import { SettingsHelpPopover } from "./SettingsHelpPopover";
 import recommendedModelsJson from "../../electron/recommended_models.json";
 
 interface SettingsPageProps {
@@ -441,7 +442,33 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         </div>
       </SettingsSection>
 
-      <SettingsSection icon={Cpu} title={t("settings.aiModels")} description={t("settings.aiSetupDescription")}>
+      <SettingsSection
+        icon={Cpu}
+        title={t("settings.aiModels")}
+        description={t("settings.aiSetupDescription")}
+        help={
+          settings.aiProvider === "openrouter" ? (
+            <SettingsHelpPopover
+              ariaLabel={t("settings.help.openRouter.aria")}
+              title={t("settings.help.openRouter.title")}
+              links={[{ label: t("settings.help.openRouter.link"), url: "https://openrouter.ai/settings/keys" }]}
+            >
+              <p>{t("settings.help.openRouter.body1")}</p>
+              <p>{t("settings.help.openRouter.body2")}</p>
+              <p>{t("settings.help.openRouter.body3")}</p>
+            </SettingsHelpPopover>
+          ) : (
+            <SettingsHelpPopover
+              ariaLabel={t("settings.help.ollama.aria")}
+              title={t("settings.help.ollama.title")}
+            >
+              <p>{t("settings.help.ollama.body1")}</p>
+              <p>{t("settings.help.ollama.body2")}</p>
+              <p>{t("settings.help.ollama.body3")}</p>
+            </SettingsHelpPopover>
+          )
+        }
+      >
         <div className="segmented-control segmented-control-spacing">
           {[
             { value: "ollama", label: t("settings.localAI"), icon: Cpu },
@@ -485,7 +512,17 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             </p>
             <p className="settings-helper-inline helper-margin-bottom">{t("settings.openRouterFreeModelNote")}</p>
             <label className="field-row">
-              <span>{t("settings.openRouterApiKey")}</span>
+              <span className="settings-label-with-help">
+                {t("settings.openRouterApiKey")}
+                <SettingsHelpPopover
+                  ariaLabel={t("settings.help.openRouterKey.aria")}
+                  title={t("settings.help.openRouterKey.title")}
+                  links={[{ label: t("settings.help.openRouter.link"), url: "https://openrouter.ai/settings/keys" }]}
+                >
+                  <p>{t("settings.help.openRouterKey.body1")}</p>
+                  <p>{t("settings.help.openRouterKey.body2")}</p>
+                </SettingsHelpPopover>
+              </span>
               <input ref={openRouterKeyRef} type="password" placeholder="sk-or-v1-..." autoComplete="off" />
             </label>
             <div className="ai-settings-actions">
@@ -681,11 +718,29 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
             {showAdvancedAI ? (
               <div className="advanced-settings">
                 <label className="field-row">
-                  <span>{t("settings.baseUrl")}</span>
+                  <span className="settings-label-with-help">
+                    {t("settings.baseUrl")}
+                    <SettingsHelpPopover
+                      ariaLabel={t("settings.help.baseUrl.aria")}
+                      title={t("settings.help.baseUrl.title")}
+                    >
+                      <p>{t("settings.help.baseUrl.body1")}</p>
+                      <p>{t("settings.help.baseUrl.body2")}</p>
+                    </SettingsHelpPopover>
+                  </span>
                   <input value={settings.aiBaseUrl} onChange={(event) => updateSettings({ aiBaseUrl: event.target.value })} placeholder="http://localhost:11434" />
                 </label>
                 <label className="field-row">
-                  <span>{t("settings.customModel")}</span>
+                  <span className="settings-label-with-help">
+                    {t("settings.customModel")}
+                    <SettingsHelpPopover
+                      ariaLabel={t("settings.help.customModel.aria")}
+                      title={t("settings.help.customModel.title")}
+                    >
+                      <p>{t("settings.help.customModel.body1")}</p>
+                      <p>{t("settings.help.customModel.body2")}</p>
+                    </SettingsHelpPopover>
+                  </span>
                   <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="qwen3.5:9b" />
                 </label>
                 <div className="advanced-settings-actions">
@@ -699,7 +754,22 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         ) : null}
       </SettingsSection>
 
-      <SettingsSection icon={Send} title={t("settings.telegramAssistant")} description={t("settings.telegramAssistantDescription")}>
+      <SettingsSection
+        icon={Send}
+        title={t("settings.telegramAssistant")}
+        description={t("settings.telegramAssistantDescription")}
+        help={
+          <SettingsHelpPopover
+            ariaLabel={t("settings.help.telegram.aria")}
+            title={t("settings.help.telegram.title")}
+            links={[{ label: t("settings.help.telegram.link"), url: "https://t.me/BotFather" }]}
+          >
+            <p>{t("settings.help.telegram.body1")}</p>
+            <p>{t("settings.help.telegram.body2")}</p>
+            <p>{t("settings.help.telegram.body3")}</p>
+          </SettingsHelpPopover>
+        }
+      >
         <label className="toggle-row">
           <span>
             <strong>{t("settings.telegramEnable")}</strong>
@@ -843,7 +913,20 @@ export function SettingsPage({ clearAiHistory, settings, updateSettings }: Setti
         {telegramNotice || telegramStatus?.message ? <p className="settings-error">{telegramNotice || telegramStatus?.message}</p> : null}
       </SettingsSection>
 
-      <SettingsSection icon={CalendarClock} title={t("settings.schedule")} description={t("settings.scheduleDescription")}>
+      <SettingsSection
+        icon={CalendarClock}
+        title={t("settings.schedule")}
+        description={t("settings.scheduleDescription")}
+        help={
+          <SettingsHelpPopover
+            ariaLabel={t("settings.help.schedule.aria")}
+            title={t("settings.help.schedule.title")}
+          >
+            <p>{t("settings.help.schedule.body1")}</p>
+            <p>{t("settings.help.schedule.body2")}</p>
+          </SettingsHelpPopover>
+        }
+      >
         <div className="availability-editor">
           <div className="availability-editor__field">
             <span>{t("task.title")}</span>
@@ -1086,11 +1169,13 @@ function SettingsSection({
   icon: Icon,
   title,
   description,
+  help,
   children,
 }: {
   icon: typeof Monitor;
   title: string;
   description?: string;
+  help?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -1099,6 +1184,7 @@ function SettingsSection({
         <div className="settings-section__title-row">
           <Icon size={16} className="settings-section__icon" />
           <h2>{title}</h2>
+          {help}
         </div>
         {description ? <p className="settings-section__description">{description}</p> : null}
       </div>
@@ -1181,6 +1267,7 @@ function formatOpenRouterStatus(status: "idle" | "checking" | "connected" | "mis
 function formatTelegramStatus(status: TelegramBridgeStatus | undefined, t: ReturnType<typeof useI18n>["t"]) {
   if (status === "connecting") return t("settings.telegramStatusConnecting");
   if (status === "connected") return t("settings.telegramStatusConnected");
+  if (status === "reconnecting") return t("settings.telegramStatusReconnecting");
   if (status === "invalid-token") return t("settings.telegramStatusInvalidToken");
   if (status === "not-paired") return t("settings.telegramStatusNotPaired");
   if (status === "webhook-conflict") return t("settings.telegramStatusWebhookConflict");
@@ -1190,7 +1277,7 @@ function formatTelegramStatus(status: TelegramBridgeStatus | undefined, t: Retur
 
 function telegramStatusTone(status: TelegramBridgeStatus | undefined) {
   if (status === "connected") return "connected";
-  if (status === "not-paired" || status === "connecting") return "model-missing";
+  if (status === "not-paired" || status === "connecting" || status === "reconnecting") return "model-missing";
   return "not-connected";
 }
 

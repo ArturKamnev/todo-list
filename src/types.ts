@@ -1,4 +1,4 @@
-export type ViewId =
+export type MainViewId =
   | "dashboard"
   | "today"
   | "upcoming"
@@ -8,6 +8,9 @@ export type ViewId =
   | "assistant"
   | "settings";
 
+export type CategoryViewId = `category:${string}`;
+export type ViewId = MainViewId | CategoryViewId;
+
 export type TaskStatus = "active" | "completed";
 export type RepeatType = "daily" | "weekly" | "monthly" | "custom";
 export type RepeatUnit = "day" | "week" | "month";
@@ -16,7 +19,7 @@ export type ThemeMode = "dark" | "light" | "system";
 export type TimeFormat = "24h" | "12h";
 export type AIProvider = "ollama" | "openrouter";
 export type Language = "en" | "ru";
-export type AIMode = "plan_day" | "create_tasks" | "replan_tasks" | "manage_tasks";
+export type AIMode = "plan_day" | "create_tasks" | "replan_tasks" | "manage_tasks" | "full_agent";
 export type ReminderOffsetMinutes = 0 | 5 | 10 | 30 | 60;
 
 export interface Subtask {

@@ -1,20 +1,27 @@
-import { AlertTriangle, ArrowUp, Bot, CalendarClock, CheckCircle2, ChevronDown, Loader2, Pencil, Plus, RotateCcw, Trash2, UserRound } from "lucide-react";
+import { AlertTriangle, ArrowUp, Bot, CalendarClock, CheckCircle2, ChevronDown, FolderPlus, History, Loader2, Pencil, Plus, RotateCcw, Trash2, Undo2, UserRound } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState, KeyboardEvent, type ReactNode } from "react";
 import { useI18n, type TranslationKey } from "../i18n";
-import { applyAssistantAction } from "../services/aiActions";
+import {
+  createAIActionProposal,
+  getAIActionUndoAvailability,
+  type AIActionAuditEntry,
+  type AIActionConfirmResult,
+  type AIActionFailureReason,
+  type AIActionProposal,
+  type AIActionUndoResult,
+} from "../services/aiActions";
 import { AIProviderError, chatWithAssistant, type AssistantAction, type ManageTaskOperation } from "../services/aiService";
-import type { AIMode, AssistantMessage, Project, Task, TaskDraft, UserSettings, ViewId } from "../types";
+import type { AIMode, AssistantMessage, Project, Task, UserSettings, ViewId } from "../types";
 import { formatScheduleLabel } from "../utils/date";
 import aevumLogoDark from "../../media/aevum-logo-dark.png";
 import aevumLogoLight from "../../media/aevum-logo-light.png";
 
 interface AIAssistantPanelProps {
-  addProject: (project: Omit<Project, "id">) => Project;
-  addTask: (task: TaskDraft) => Task;
-  onDeleteTask: (taskId: string) => void;
-  onSetTaskStatus: (taskId: string, status: Task["status"]) => void;
-  onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
+  aiActionAuditLog: AIActionAuditEntry[];
   messages: AssistantMessage[];
+  onCancelAIProposal: (proposal: AIActionProposal) => void;
+  onConfirmAIProposal: (proposal: AIActionProposal) => AIActionConfirmResult;
+  onUndoAIAction: (transactionId: string) => AIActionUndoResult;
   projects: Project[];
   setMessages: (messages: AssistantMessage[]) => void;
   settings: UserSettings;
@@ -44,6 +51,11 @@ const modeMeta: Record<AIMode, { title: TranslationKey; description: Translation
     description: "assistant.mode.manageTasksDescription",
     placeholder: "assistant.placeholder.manageTasks",
   },
+  full_agent: {
+    title: "assistant.mode.fullAgent",
+    description: "assistant.mode.fullAgentDescription",
+    placeholder: "assistant.placeholder.fullAgent",
+  },
 };
 
 const openRouterModelOptions = [
@@ -58,12 +70,11 @@ const openRouterModelOptions = [
 ] as const;
 
 export function AIAssistantPanel({
-  addProject,
-  addTask,
-  onDeleteTask,
-  onSetTaskStatus,
-  onUpdateTask,
+  aiActionAuditLog,
   messages,
+  onCancelAIProposal,
+  onConfirmAIProposal,
+  onUndoAIAction,
   projects,
   setMessages,
   settings,
@@ -76,11 +87,14 @@ export function AIAssistantPanel({
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const [pendingRetry, setPendingRetry] = useState<string | null>(null);
-  const [pendingAction, setPendingAction] = useState<AssistantAction | null>(null);
+  const [pendingProposal, setPendingProposal] = useState<AIActionProposal | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [showToolsDropdown, setShowToolsDropdown] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
+  const [undoCandidate, setUndoCandidate] = useState<AIActionAuditEntry | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pendingAction = pendingProposal?.action ?? null;
 
   const [panelState, setPanelState] = useState<"empty" | "leaving-empty" | "conversation">(
     messages.length === 0 ? "empty" : "conversation"
@@ -192,15 +206,27 @@ export function AIAssistantPanel({
     setMessages(nextMessages);
     setInput("");
     setPendingRetry(null);
-    setPendingAction(null);
+    setPendingProposal(null);
     setIsThinking(true);
 
     try {
       const result = await chatWithAssistant(originalContent, tasks, settings, activeTool, projects);
+      const responseMessages = [result.message];
       if (result.action) {
-        setPendingAction(result.action);
+        const proposalResult = createAIActionProposal(result.action, "assistant", { tasks, projects }, { ttlMs: 10 * 60_000 });
+        if (proposalResult.ok) {
+          setPendingProposal(proposalResult.proposal);
+        } else {
+          responseMessages.push({
+            id: `message-${Date.now()}-proposal-error`,
+            role: "error",
+            content: getProposalFailureMessage(proposalResult.reason, t),
+            createdAt: new Date().toISOString(),
+            metadata: { actionType: result.action.type },
+          });
+        }
       }
-      setMessages([...nextMessages, result.message]);
+      setMessages([...nextMessages, ...responseMessages]);
     } catch (error) {
       const aiError = normalizeAIError(error, t);
       console.error("[Aevum] Assistant request failed", {
@@ -234,30 +260,21 @@ export function AIAssistantPanel({
   }
 
   function applyPendingTasks() {
-    if (!pendingAction) return;
+    if (!pendingProposal) return;
+    const action = pendingProposal.action;
     try {
-      const actionResult = applyAssistantAction(pendingAction, {
-        addProject,
-        addTask,
-        deleteTask: onDeleteTask,
-        projects,
-        setTaskStatus: onSetTaskStatus,
-        tasks,
-        updateTask: onUpdateTask,
-      });
+      const actionResult = onConfirmAIProposal(pendingProposal);
       setMessages([
         ...messages,
         {
           id: `message-${Date.now()}-action`,
           role: actionResult.ok ? "action" : "error",
-          content: actionResult.ok ? getAppliedMessage(pendingAction, t) : t("assistant.couldNotSaveTask"),
+          content: actionResult.ok ? getAppliedMessage(action, t) : getProposalFailureMessage(actionResult.reason, t),
           createdAt: new Date().toISOString(),
-          metadata: { actionType: pendingAction.type },
+          metadata: { actionType: action.type },
         },
       ]);
-      if (actionResult.ok) {
-        setPendingAction(null);
-      }
+      setPendingProposal(null);
     } catch (error) {
       if (import.meta.env.DEV) {
         console.error("[Aevum] Failed to save AI-created tasks", error);
@@ -267,17 +284,58 @@ export function AIAssistantPanel({
         {
           id: `message-${Date.now()}-save-error`,
           role: "error",
-          content: pendingAction.type === "schedule_tasks" ? t("assistant.couldNotSavePlan") : t("assistant.couldNotSaveTask"),
+          content: action.type === "schedule_tasks" ? t("assistant.couldNotSavePlan") : t("assistant.couldNotSaveTask"),
           createdAt: new Date().toISOString(),
-          metadata: { actionType: pendingAction.type },
+          metadata: { actionType: action.type },
         },
       ]);
+      setPendingProposal(null);
     }
+  }
+
+  function cancelPendingProposal() {
+    if (!pendingProposal) return;
+    onCancelAIProposal(pendingProposal);
+    const actionType = pendingProposal.actionType;
+    setPendingProposal(null);
+    setMessages([
+      ...messages,
+      {
+        id: `message-${Date.now()}-action-canceled`,
+        role: "action",
+        content: t("assistant.actionCanceled"),
+        createdAt: new Date().toISOString(),
+        metadata: { actionType },
+      },
+    ]);
+  }
+
+  function requestUndo(entry: AIActionAuditEntry) {
+    if (entry.summary.destructive || entry.summary.taskCount > 1) {
+      setUndoCandidate(entry);
+      return;
+    }
+    applyUndo(entry);
+  }
+
+  function applyUndo(entry: AIActionAuditEntry) {
+    const result = onUndoAIAction(entry.transactionId);
+    setUndoCandidate(null);
+    setMessages([
+      ...messages,
+      {
+        id: `message-${Date.now()}-undo`,
+        role: result.ok ? "action" : "error",
+        content: result.ok ? undoSuccessMessage(result.warnings, t) : getUndoFailureMessage(result.reason, t),
+        createdAt: new Date().toISOString(),
+        metadata: { actionType: "undo" },
+      },
+    ]);
   }
 
   function clearHistory() {
     setMessages([]);
-    setPendingAction(null);
+    setPendingProposal(null);
     setConfirmClear(false);
   }
 
@@ -288,6 +346,60 @@ export function AIAssistantPanel({
   return (
     <section className={`assistant-panel assistant-panel--${panelState}`}>
       <div className="assistant-workspace">
+        <div className="assistant-activity-anchor">
+          <button
+            className={`assistant-activity-trigger ${showActivity ? "assistant-activity-trigger--active" : ""}`}
+            type="button"
+            onClick={() => setShowActivity((value) => !value)}
+            aria-expanded={showActivity}
+            aria-haspopup="dialog"
+            title={t("assistant.activity")}
+          >
+            <History size={15} />
+            <span>{t("assistant.activity")}</span>
+          </button>
+          {showActivity && (
+            <div className="assistant-activity-panel" role="dialog" aria-label={t("assistant.activityTitle")}>
+              <div className="assistant-activity-panel__header">
+                <div>
+                  <strong>{t("assistant.activityTitle")}</strong>
+                  <span>{t("assistant.activityDescription")}</span>
+                </div>
+              </div>
+              <div className="assistant-activity-list">
+                {aiActionAuditLog.length === 0 ? (
+                  <p className="assistant-activity-empty">{t("assistant.historyEmpty")}</p>
+                ) : (
+                  aiActionAuditLog.slice(0, 12).map((entry) => {
+                    const availability = getAIActionUndoAvailability(entry, { tasks, projects });
+                    const canUndo = availability.available;
+                    return (
+                      <article className="assistant-activity-item" key={entry.transactionId}>
+                        <div className="assistant-activity-item__main">
+                          <div className="assistant-activity-item__summary">
+                            <strong>{formatAuditSummary(entry, t)}</strong>
+                            <span>{formatAuditTime(entry.appliedAt, language)}</span>
+                          </div>
+                          <div className="assistant-activity-item__meta">
+                            <span>{entry.source === "telegram" ? t("assistant.sourceTelegram") : t("assistant.sourceAI")}</span>
+                            <span>{formatAuditStatus(entry, canUndo, t)}</span>
+                          </div>
+                        </div>
+                        {canUndo ? (
+                          <button className="assistant-activity-undo" type="button" onClick={() => requestUndo(entry)}>
+                            <Undo2 size={13} />
+                            {t("assistant.undo")}
+                          </button>
+                        ) : null}
+                      </article>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         <div className="assistant-conversation-area">
           {!isEmpty && (
             <div className="assistant-conversation-header">
@@ -327,7 +439,7 @@ export function AIAssistantPanel({
                   <span>{t("assistant.taskPreviewDescription")}</span>
                 </div>
                 <div className="assistant-task-preview__actions">
-                  <button className="button button--secondary" onClick={() => setPendingAction(null)} type="button">
+                  <button className="button button--secondary" onClick={cancelPendingProposal} type="button">
                     {t("assistant.cancelPreview")}
                   </button>
                   <button className="button button--primary" onClick={applyPendingTasks} type="button">
@@ -359,7 +471,7 @@ export function AIAssistantPanel({
                   <span>{t("assistant.planPreviewDescription")}</span>
                 </div>
                 <div className="assistant-task-preview__actions">
-                  <button className="button button--secondary" onClick={() => setPendingAction(null)} type="button">
+                  <button className="button button--secondary" onClick={cancelPendingProposal} type="button">
                     {t("assistant.cancelPreview")}
                   </button>
                   <button className="button button--primary" onClick={applyPendingTasks} type="button">
@@ -373,7 +485,7 @@ export function AIAssistantPanel({
                   const task = tasks.find((item) => item.id === change.taskId);
                   return (
                     <article className="assistant-task-preview__card" key={`${change.taskId}-${change.scheduledAt}`} style={{ "--index": index } as React.CSSProperties}>
-                      <strong>{task?.title ?? change.taskId}</strong>
+                      <strong>{task?.title ?? t("assistant.taskUnavailable")}</strong>
                       <span>{formatScheduleLabel(change.scheduledAt, scheduleLabels, language, settings.timeFormat)}</span>
                       <span>{change.durationMinutes ?? task?.durationMinutes ?? 30} min</span>
                       {change.reason ? <p>{change.reason}</p> : null}
@@ -392,7 +504,7 @@ export function AIAssistantPanel({
                   <span>{t("assistant.managePreviewDescription")}</span>
                 </div>
                 <div className="assistant-task-preview__actions">
-                  <button className="button button--secondary" onClick={() => setPendingAction(null)} type="button">
+                  <button className="button button--secondary" onClick={cancelPendingProposal} type="button">
                     {t("assistant.cancelPreview")}
                   </button>
                   <button className="button button--primary" onClick={applyPendingTasks} type="button">
@@ -432,6 +544,178 @@ export function AIAssistantPanel({
             </div>
           )}
 
+          {pendingAction?.type === "batch_action" && (
+            <div className="assistant-task-preview assistant-task-preview--manage">
+              <div className="assistant-task-preview__header">
+                <div>
+                  <strong>{t("assistant.managePreviewTitle")}</strong>
+                  <span>{t("assistant.managePreviewDescription")}</span>
+                </div>
+                <div className="assistant-task-preview__actions">
+                  <button className="button button--secondary" onClick={cancelPendingProposal} type="button">
+                    {t("assistant.cancelPreview")}
+                  </button>
+                  <button className="button button--primary" onClick={applyPendingTasks} type="button">
+                    <CheckCircle2 size={16} />
+                    {t("assistant.applyChanges")}
+                  </button>
+                </div>
+              </div>
+
+              {pendingAction.categoriesToCreate && pendingAction.categoriesToCreate.length > 0 && (
+                <div className="assistant-batch-section" style={{ marginBottom: "16px", width: "100%" }}>
+                  <div style={{ fontSize: "var(--font-xs)", fontWeight: "650", color: "var(--text-muted)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    {language === "ru" ? "Создать новые категории" : "Create new categories"}
+                  </div>
+                  <div className="assistant-manage-preview__list">
+                    {pendingAction.categoriesToCreate.map((cat, index) => (
+                      <article className="assistant-manage-preview__item" key={`create-cat-${cat.ref}-${index}`} style={{ "--index": index } as React.CSSProperties}>
+                        <div className="assistant-manage-preview__icon">
+                          <FolderPlus size={16} />
+                        </div>
+                        <div className="assistant-manage-preview__content">
+                          <div className="assistant-manage-preview__title">
+                            <strong>{cat.name}</strong>
+                            <span>{language === "ru" ? "Новая категория" : "New category"}</span>
+                          </div>
+                          <p style={{ fontSize: "var(--font-xs)", color: "var(--text-muted)", margin: 0 }}>
+                            Ref: {cat.ref}
+                          </p>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {pendingAction.categoriesToRename && pendingAction.categoriesToRename.length > 0 && (
+                <div className="assistant-batch-section" style={{ marginBottom: "16px", width: "100%" }}>
+                  <div style={{ fontSize: "var(--font-xs)", fontWeight: "650", color: "var(--text-muted)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    {language === "ru" ? "Переименовать категории" : "Rename categories"}
+                  </div>
+                  <div className="assistant-manage-preview__list">
+                    {pendingAction.categoriesToRename.map((rename, index) => {
+                      const project = projects.find(p => p.id === rename.categoryId);
+                      return (
+                        <article className="assistant-manage-preview__item" key={`rename-cat-${rename.categoryId}-${index}`} style={{ "--index": index } as React.CSSProperties}>
+                          <div className="assistant-manage-preview__icon">
+                            <Pencil size={16} />
+                          </div>
+                          <div className="assistant-manage-preview__content">
+                            <div className="assistant-manage-preview__title">
+                              <strong>{project?.name ?? rename.categoryId}</strong>
+                              <span>{language === "ru" ? "Переименование" : "Rename"}</span>
+                            </div>
+                            <div className="assistant-manage-preview__changes">
+                              <span className="assistant-manage-preview__line">
+                                {language === "ru" ? "Имя: " : "Name: "}
+                                <span className="value-old">{project?.name ?? rename.categoryId}</span>
+                                <span className="arrow">→</span>
+                                <span className="value-new">{rename.newName}</span>
+                              </span>
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              
+              {pendingAction.tasksToCreate && pendingAction.tasksToCreate.length > 0 && (
+                <div className="assistant-batch-section" style={{ marginBottom: "16px", width: "100%" }}>
+                  <div style={{ fontSize: "var(--font-xs)", fontWeight: "650", color: "var(--text-muted)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    {language === "ru" ? "Создать новые задачи" : "Create new tasks"}
+                  </div>
+                  <div className="assistant-task-preview__grid">
+                    {pendingAction.tasksToCreate.map((task, index) => {
+                      const getTaskCategoryName = () => {
+                        const target = task.categoryTarget;
+                        if (target) {
+                          if (target.kind === "existing") {
+                            const p = projects.find(p => p.id === target.categoryId);
+                            return p?.name ?? target.categoryId;
+                          } else if (target.kind === "new") {
+                            const draft = pendingAction.categoriesToCreate?.find(c => c.ref === target.ref);
+                            return draft ? `${draft.name} (New)` : target.ref;
+                          }
+                        }
+                        return task.projectName;
+                      };
+                      const catName = getTaskCategoryName();
+                      return (
+                        <article className="assistant-task-preview__card" key={`${task.title}-${index}`} style={{ "--index": index } as React.CSSProperties}>
+                          <strong>{task.title}</strong>
+                          {task.description ? <p>{task.description}</p> : null}
+                          <span>{formatScheduleLabel(task.scheduledAt ?? null, scheduleLabels, language, settings.timeFormat)}</span>
+                          {task.durationMinutes ? <span>{task.durationMinutes} min</span> : null}
+                          {catName ? <span>{catName}</span> : null}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {pendingAction.scheduleChanges && pendingAction.scheduleChanges.length > 0 && (
+                <div className="assistant-batch-section" style={{ marginBottom: "16px", width: "100%" }}>
+                  <div style={{ fontSize: "var(--font-xs)", fontWeight: "650", color: "var(--text-muted)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    {language === "ru" ? "Запланировать задачи" : "Schedule tasks"}
+                  </div>
+                  <div className="assistant-task-preview__grid">
+                    {pendingAction.scheduleChanges.map((change, index) => {
+                      const task = tasks.find((item) => item.id === change.taskId);
+                      return (
+                        <article className="assistant-task-preview__card" key={`${change.taskId}-${change.scheduledAt}`} style={{ "--index": index } as React.CSSProperties}>
+                          <strong>{task?.title ?? t("assistant.taskUnavailable")}</strong>
+                          <span>{formatScheduleLabel(change.scheduledAt, scheduleLabels, language, settings.timeFormat)}</span>
+                          <span>{change.durationMinutes ?? task?.durationMinutes ?? 30} min</span>
+                          {change.reason ? <p>{change.reason}</p> : null}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {pendingAction.manageOperations && pendingAction.manageOperations.length > 0 && (
+                <div className="assistant-batch-section" style={{ width: "100%" }}>
+                  <div style={{ fontSize: "var(--font-xs)", fontWeight: "650", color: "var(--text-muted)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    {language === "ru" ? "Изменить задачи" : "Manage tasks"}
+                  </div>
+                  <div className="assistant-manage-preview__list">
+                    {pendingAction.manageOperations.map((operation, index) => {
+                      const task = tasks.find((item) => item.id === operation.taskId);
+                      const isDelete = operation.operation === "delete";
+                      const Icon = isDelete ? Trash2 : operation.operation === "set_status" ? CheckCircle2 : operation.changes?.scheduledAt !== undefined ? CalendarClock : Pencil;
+                      return (
+                        <article className={`assistant-manage-preview__item ${isDelete ? "assistant-manage-preview__item--danger" : ""}`} key={`${operation.operation}-${operation.taskId}-${index}`} style={{ "--index": index } as React.CSSProperties}>
+                          <div className="assistant-manage-preview__icon">
+                            <Icon size={16} />
+                          </div>
+                          <div className="assistant-manage-preview__content">
+                            <div className="assistant-manage-preview__title">
+                              <strong>{task?.title ?? t("assistant.taskUnavailable")}</strong>
+                              <span>{getManageOperationLabel(operation.operation, t)}</span>
+                            </div>
+                            {task ? (
+                              <div className="assistant-manage-preview__changes">
+                                {renderManageOperationChanges(operation, task, projects, scheduleLabels, language, settings.timeFormat, t)}
+                              </div>
+                            ) : (
+                              <p>{t("assistant.taskUnavailableDescription")}</p>
+                            )}
+                            {operation.reason ? <p>{operation.reason}</p> : null}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {pendingRetry && (
             <div className="assistant-error-strip">
               <AlertTriangle size={16} />
@@ -467,18 +751,21 @@ export function AIAssistantPanel({
                   <>
                     <div className="composer-dropdown-backdrop" onClick={() => setShowToolsDropdown(false)} />
                     <div className="composer-tool-dropdown">
-                      {(["create_tasks", "plan_day", "manage_tasks"] as AIMode[]).map((item) => (
+                      {(["create_tasks", "plan_day", "manage_tasks", "full_agent"] as AIMode[]).map((item) => (
                         <button
                           className={`composer-tool-item ${activeTool === item ? "composer-tool-item--active" : ""}`}
                           key={item}
                           onClick={() => {
                             setActiveTool(item);
-                            setPendingAction(null);
+                            setPendingProposal(null);
                             setShowToolsDropdown(false);
                           }}
                           type="button"
                         >
-                          <strong>{t(modeMeta[item].title)}</strong>
+                          <strong>
+                            {t(modeMeta[item].title)}
+                            {item === "full_agent" && <span className="beta-badge">Beta</span>}
+                          </strong>
                           <span>{t(modeMeta[item].description)}</span>
                         </button>
                       ))}
@@ -489,13 +776,16 @@ export function AIAssistantPanel({
 
               {activeTool !== null && (
                 <div className="composer-active-chip">
-                  <span>{t(modeMeta[activeTool].title)}</span>
+                  <span>
+                    {t(modeMeta[activeTool].title)}
+                    {activeTool === "full_agent" && <span className="beta-badge-chip">Beta</span>}
+                  </span>
                   <button
                     type="button"
                     className="composer-active-chip__remove"
                     onClick={() => {
                       setActiveTool(null);
-                      setPendingAction(null);
+                      setPendingProposal(null);
                     }}
                     title={t("assistant.removeTool")}
                   >
@@ -664,6 +954,23 @@ export function AIAssistantPanel({
               </button>
               <button className="button button--primary" onClick={clearHistory}>
                 {t("settings.confirm")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {undoCandidate && (
+        <div className="confirm-overlay" role="presentation" onMouseDown={() => setUndoCandidate(null)}>
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="undo-ai-action-title" onMouseDown={(event) => event.stopPropagation()}>
+            <h2 id="undo-ai-action-title">{t("assistant.undoConfirmTitle")}</h2>
+            <p>{t("assistant.undoConfirmDescription")}</p>
+            <div className="confirm-dialog__actions">
+              <button className="button button--secondary" onClick={() => setUndoCandidate(null)} type="button">
+                {t("settings.cancel")}
+              </button>
+              <button className="button button--primary" onClick={() => applyUndo(undoCandidate)} type="button">
+                {t("assistant.undo")}
               </button>
             </div>
           </div>
@@ -886,6 +1193,61 @@ function getAppliedMessage(action: AssistantAction, t: (key: TranslationKey) => 
   if (action.type === "schedule_tasks") return t("assistant.planApplied");
   if (action.type === "manage_tasks") return t("assistant.changesApplied");
   return t("assistant.tasksCreated");
+}
+
+function getProposalFailureMessage(reason: AIActionFailureReason, t: (key: TranslationKey) => string) {
+  if (reason === "expired") return t("assistant.proposalExpired");
+  if (reason === "stale") return t("assistant.proposalStale");
+  if (reason === "replayed") return t("assistant.proposalExpired");
+  return t("assistant.transactionFailed");
+}
+
+function getUndoFailureMessage(reason: AIActionFailureReason, t: (key: TranslationKey) => string) {
+  if (reason === "conflict" || reason === "unsafe_undo") return t("assistant.undoUnavailable");
+  return t("assistant.transactionFailed");
+}
+
+function undoSuccessMessage(warnings: string[], t: (key: TranslationKey) => string) {
+  return warnings.length ? t("assistant.undoSuccessfulWithLimit") : t("assistant.undoSuccessful");
+}
+
+function formatAuditSummary(entry: AIActionAuditEntry, t: (key: TranslationKey) => string) {
+  const firstTitle = entry.summary.taskTitles[0] ?? "";
+  if (entry.actionKind === "undo") return t("assistant.undoApplied");
+  if (entry.actionKind === "create") {
+    return entry.summary.createdTaskCount === 1 && firstTitle
+      ? `${t("assistant.activityCreatedOne")} ${firstTitle}`
+      : `${t("assistant.activityCreatedMany")} ${entry.summary.createdTaskCount} ${t("task.tasks").toLowerCase()}`;
+  }
+  if (entry.actionKind === "schedule" || entry.actionKind === "replan") {
+    return entry.summary.taskCount === 1 && firstTitle
+      ? `${t("assistant.activityRescheduledOne")} ${firstTitle}`
+      : `${t("assistant.activityRescheduledMany")} ${entry.summary.taskCount} ${t("task.tasks").toLowerCase()}`;
+  }
+  if (entry.summary.deletedTaskCount === 1 && firstTitle) return `${t("assistant.activityDeletedOne")} ${firstTitle}`;
+  if (entry.summary.deletedTaskCount > 1) return `${t("assistant.activityDeletedMany")} ${entry.summary.deletedTaskCount} ${t("task.tasks").toLowerCase()}`;
+  if (entry.summary.completedTaskCount === 1 && firstTitle) return `${t("assistant.activityCompletedOne")} ${firstTitle}`;
+  if (entry.summary.reopenedTaskCount === 1 && firstTitle) return `${t("assistant.activityReopenedOne")} ${firstTitle}`;
+  return entry.summary.taskCount === 1 && firstTitle
+    ? `${t("assistant.activityUpdatedOne")} ${firstTitle}`
+    : `${t("assistant.activityUpdatedMany")} ${entry.summary.taskCount} ${t("task.tasks").toLowerCase()}`;
+}
+
+function formatAuditTime(value: string, language: UserSettings["language"]) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(language === "ru" ? "ru-RU" : "en", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatAuditStatus(entry: AIActionAuditEntry, canUndo: boolean, t: (key: TranslationKey) => string) {
+  if (entry.status === "undone") return t("assistant.statusUndone");
+  if (entry.status === "conflicted" || (!canUndo && entry.actionKind !== "undo" && entry.status === "applied")) return t("assistant.statusCannotUndo");
+  return t("assistant.statusApplied");
 }
 
 function getManageOperationLabel(operation: ManageTaskOperation["operation"], t: (key: TranslationKey) => string) {

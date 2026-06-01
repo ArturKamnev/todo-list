@@ -87,6 +87,7 @@ export function AppShell({
       <main className="main-area">
         <TopBar
           activeView={activeView}
+          projects={projects}
           theme={theme}
           onNewTask={onNewTask}
           onOpenCommandPalette={onOpenCommandPalette}

@@ -1,8 +1,9 @@
 import { Command, Moon, Plus, Search, Sun } from "lucide-react";
 import { useI18n, type TranslationKey } from "../i18n";
-import type { ThemeMode, ViewId } from "../types";
+import type { MainViewId, Project, ThemeMode, ViewId } from "../types";
+import { getCategoryIdFromView, getMainViewFromView } from "../utils/navigation";
 
-const viewTitle: Record<ViewId, TranslationKey> = {
+const viewTitle: Record<MainViewId, TranslationKey> = {
   dashboard: "nav.dashboard",
   today: "nav.today",
   upcoming: "nav.upcoming",
@@ -15,14 +16,18 @@ const viewTitle: Record<ViewId, TranslationKey> = {
 
 interface TopBarProps {
   activeView: ViewId;
+  projects: Project[];
   theme: ThemeMode;
   onNewTask: () => void;
   onOpenCommandPalette: () => void;
   onToggleTheme: () => void;
 }
 
-export function TopBar({ activeView, theme, onNewTask, onOpenCommandPalette, onToggleTheme }: TopBarProps) {
+export function TopBar({ activeView, projects, theme, onNewTask, onOpenCommandPalette, onToggleTheme }: TopBarProps) {
   const { language, t } = useI18n();
+  const activeMainView = getMainViewFromView(activeView);
+  const activeCategoryId = getCategoryIdFromView(activeView);
+  const activeCategory = activeCategoryId ? projects.find((project) => project.id === activeCategoryId) : undefined;
   const currentDate = new Intl.DateTimeFormat(language === "ru" ? "ru-RU" : "en", {
     weekday: "long",
     month: "long",
@@ -32,7 +37,7 @@ export function TopBar({ activeView, theme, onNewTask, onOpenCommandPalette, onT
   return (
     <header className="topbar">
       <div>
-        <h1>{t(viewTitle[activeView])}</h1>
+        <h1>{activeCategory?.name ?? t(activeMainView ? viewTitle[activeMainView] : "nav.projects")}</h1>
         <p>{currentDate}</p>
       </div>
       <div className="topbar__actions">

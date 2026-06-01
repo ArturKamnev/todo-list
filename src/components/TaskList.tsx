@@ -24,7 +24,10 @@ interface TaskListProps {
   onBreakDownTask?: (task: Task) => Promise<string[]>;
   onEditTask?: (task: Task) => void;
   timeFormat: TimeFormat;
-  viewMode?: "today" | "upcoming";
+  viewMode?: "today" | "upcoming" | "category";
+  activeCategory?: Project;
+  hideCategoryFilter?: boolean;
+  totalCount?: number;
 }
 
 const statusScore: Record<TaskStatus, number> = { active: 0, completed: 1 };
@@ -70,12 +73,15 @@ export function TaskList(props: TaskListProps) {
     setSortMode,
     onToggleTask,
     onDeleteTask,
-  onUpdateTask,
-  onToggleSubtask,
-  onBreakDownTask,
-  onEditTask,
-  timeFormat,
-  viewMode = "today",
+    onUpdateTask,
+    onToggleSubtask,
+    onBreakDownTask,
+    onEditTask,
+    timeFormat,
+    viewMode = "today",
+    activeCategory,
+    hideCategoryFilter = false,
+    totalCount,
   } = props;
 
   const visibleTasks = useMemo(
@@ -112,13 +118,16 @@ export function TaskList(props: TaskListProps) {
     <section className={`task-list-panel task-list-panel--${viewMode}`}>
       <div className="panel-heading">
         <div>
-          <h2>{viewMode === "upcoming" ? t("nav.upcoming") : t("nav.today")}</h2>
-          <p>{visibleTasks.length} {t("task.matchingItems")}</p>
+          <div className="task-list-panel__title">
+            {viewMode === "category" && activeCategory ? <span className="project-dot" style={{ background: activeCategory.color }} /> : null}
+            <h2>{viewMode === "category" && activeCategory ? activeCategory.name : viewMode === "upcoming" ? t("nav.upcoming") : t("nav.today")}</h2>
+          </div>
+          <p>{totalCount ?? visibleTasks.length} {t("task.matchingItems")}</p>
         </div>
         <SlidersHorizontal size={18} />
       </div>
 
-      <div className="task-toolbar">
+      <div className={`task-toolbar ${hideCategoryFilter ? "task-toolbar--compact" : ""}`}>
         <label className="search-field">
           <Search size={17} />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("task.searchPlaceholder")} />
@@ -128,14 +137,16 @@ export function TaskList(props: TaskListProps) {
           <option value="active">{t("task.active")}</option>
           <option value="completed">{t("task.completed")}</option>
         </select>
-        <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
-          <option value="all">{t("task.allCategories")}</option>
-          {projects.map((project) => (
-            <option key={project.id} value={project.id}>
-              {project.name}
-            </option>
-          ))}
-        </select>
+        {!hideCategoryFilter && (
+          <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+            <option value="all">{t("task.allCategories")}</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        )}
         <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)}>
           <option value="deadline">{t("task.sort.deadline")}</option>
           <option value="status">{t("task.sort.status")}</option>

@@ -3,7 +3,7 @@ import { getScheduleDate, getScheduleTime, getTodayISO, normalizeScheduledAt } f
 import { defaultRepeat, normalizeRepeat } from "../utils/recurrence";
 
 export type AIConnectionStatus = "idle" | "connected" | "not-connected" | "model-missing";
-type StructuredSchema = "create_tasks" | "plan_day" | "replan_tasks" | "manage_tasks" | "create_subtasks";
+type StructuredSchema = "create_tasks" | "plan_day" | "replan_tasks" | "manage_tasks" | "create_subtasks" | "auto_agent" | "full_agent";
 const dayMinutes = 24 * 60;
 const guideMaxLength = 2000;
 const taskDraftMaxLength = 800;
@@ -11,6 +11,20 @@ const taskDraftMaxLength = 800;
 export interface AIModelInfo {
   name: string;
   modifiedAt?: string;
+}
+
+export type AICategoryTarget =
+  | { kind: "existing"; categoryId: string }
+  | { kind: "new"; ref: string };
+
+export interface AICategoryDraft {
+  ref: string;
+  name: string;
+}
+
+export interface CategoryRenameDraft {
+  categoryId: string;
+  newName: string;
 }
 
 export interface AIConnectionResult {
@@ -29,6 +43,7 @@ export interface AITaskDraft {
   reminderMinutes?: ReminderOffsetMinutes | null;
   repeat?: RepeatRule;
   projectName?: string;
+  categoryTarget?: AICategoryTarget;
   tags?: string[];
 }
 
@@ -86,7 +101,28 @@ export interface ManageTasksAction {
   operations: ManageTaskOperation[];
 }
 
-export type AssistantAction = CreateTasksAction | ScheduleTasksAction | ManageTasksAction;
+export interface BatchAction {
+  type: "batch_action";
+  categoriesToCreate?: AICategoryDraft[];
+  categoriesToRename?: CategoryRenameDraft[];
+  tasksToCreate?: AITaskDraft[];
+  scheduleChanges?: ScheduleChangeDraft[];
+  manageOperations?: ManageTaskOperation[];
+}
+
+export type AssistantAction = CreateTasksAction | ScheduleTasksAction | ManageTasksAction | BatchAction;
+
+export type FullAgentProposal = BatchAction;
+
+export type FullAgentDecision =
+  | { kind: "answer"; message: string }
+  | { kind: "clarify"; message: string }
+  | { kind: "proposal"; message: string; proposal: FullAgentProposal };
+
+export type AgentDecision =
+  | { kind: "answer"; message: string }
+  | { kind: "clarify"; message: string }
+  | { kind: "proposal"; message: string; action: AssistantAction };
 
 export interface AIChatResult {
   message: AssistantMessage;
@@ -183,16 +219,25 @@ function authorizeActionResult(
   const action = result.action;
   if (!action) return result; // No action to authorize, always allowed
 
-  // Guide Mode: reject all task or planning actions
+  // Guide Mode / Auto Agent orchestrator: authorize all task productivity actions
   if (mode === null) {
-    return {
-      message: createAssistantMessage(
-        language === "ru"
-          ? "Чтобы создать или спланировать задачи, пожалуйста, выберите соответствующий инструмент в меню +."
-          : "To create, plan, or manage tasks, please select the appropriate tool from the + menu."
-      ),
-      action: undefined,
-    };
+    const isAllowedAction =
+      action.type === "create_tasks" ||
+      action.type === "schedule_tasks" ||
+      action.type === "manage_tasks" ||
+      action.type === "batch_action";
+
+    if (!isAllowedAction) {
+      return {
+        message: createAssistantMessage(
+          language === "ru"
+            ? "Это действие не поддерживается или запрещено."
+            : "This action is not supported or permitted."
+        ),
+        action: undefined,
+      };
+    }
+    return result;
   }
 
   // Create Tasks mode: allow only create_tasks action
@@ -234,11 +279,25 @@ function authorizeActionResult(
     return {
       message: createAssistantMessage(
         language === "ru"
-          ? "\u0412 \u044d\u0442\u043e\u043c \u0440\u0435\u0436\u0438\u043c\u0435 \u043c\u043e\u0436\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u0437\u043c\u0435\u043d\u044f\u0442\u044c \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 \u0437\u0430\u0434\u0430\u0447\u0438. \u0414\u043b\u044f \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0438\u043b\u0438 \u043f\u043b\u0430\u043d\u0430 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u043e\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442."
+          ? "\u0412 \u044d\u0442\u043e\u043c \u0440\u0435\u0436\u0438\u043c\u0435 \u043c\u043e\u0436\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u0437\u043c\u0435\u043d\u044f\u0442\u044c \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 \u0437\u0430\u0434\u0430\u0447\u0438. \u0414\u043b\u044f \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0438\u043b\u0438 \u043f\u043b\u0430\u043d\u0430 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u0443\u0436\u043d\u044b\u0439 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442."
           : "Only existing task management is allowed in this mode. To create tasks or plan a day, choose the matching tool."
       ),
       action: undefined,
     };
+  }
+
+  if (mode === "full_agent") {
+    if (action.type !== "batch_action") {
+      return {
+        message: createAssistantMessage(
+          language === "ru"
+            ? "Действие запрещено. В режиме Полного Агента разрешены только пакетные действия."
+            : "Action denied. Only batch actions are permitted in Full Agent mode."
+        ),
+        action: undefined,
+      };
+    }
+    return result;
   }
 
   return result;
@@ -251,8 +310,16 @@ export async function chatWithAssistant(
   mode: AIMode | null,
   projectContext: Project[] = [],
 ): Promise<AIChatResult> {
-  const result = await chatWithAssistantInternal(userMessage, taskContext, settings, mode, projectContext);
-  return authorizeActionResult(result, mode, settings.language);
+  try {
+    const result = await chatWithAssistantInternal(userMessage, taskContext, settings, mode, projectContext);
+    return authorizeActionResult(result, mode, settings.language);
+  } catch (error) {
+    const cleanMsg = getCleanLocalizedErrorMessage(error, settings.language);
+    return {
+      message: createAssistantMessage(cleanMsg),
+      action: undefined,
+    };
+  }
 }
 
 async function chatWithAssistantInternal(
@@ -263,28 +330,36 @@ async function chatWithAssistantInternal(
   projectContext: Project[],
 ): Promise<AIChatResult> {
   if (mode === null) {
-    const msg = userMessage.toLowerCase().trim();
-    const isActionRequest =
-      msg.startsWith("create ") || msg.startsWith("add ") || msg.startsWith("schedule ") || msg.startsWith("plan ") ||
-      msg.startsWith("delete ") || msg.startsWith("remove ") || msg.startsWith("edit ") || msg.startsWith("rename ") || msg.startsWith("mark ") || msg.startsWith("complete ") || msg.startsWith("reopen ") || msg.startsWith("reschedule ") ||
-      msg.startsWith("создай") || msg.startsWith("добавь") || msg.startsWith("запланируй") || msg.startsWith("спланируй") || msg.startsWith("распланируй") ||
-      msg.includes("создай задачу") || msg.includes("создать задачу") || msg.includes("добавь задачу") || msg.includes("добавить задачу");
+    const systemPrompt = buildAutoAgentPrompt(taskContext, projectContext, settings.availabilityBlocks, settings.language);
+    const decision = await requestStructuredAI(
+      userMessage,
+      systemPrompt,
+      "auto_agent",
+      settings,
+      (value) => validateAgentDecision(value, taskContext, projectContext, settings.language, settings.availabilityBlocks)
+    );
 
-    if (isActionRequest) {
-      return {
-        message: createAssistantMessage(
-          settings.language === "ru"
-            ? "Чтобы создать или спланировать задачи, пожалуйста, выберите соответствующий инструмент в меню +."
-            : "To create, plan, or manage tasks, please select the appropriate tool from the + menu."
-        ),
-        action: undefined,
-      };
-    }
-
-    const raw = await requestGuideText(userMessage, taskContext, settings);
+    const action = decision.kind === "proposal" ? decision.action : undefined;
     return {
-      message: createAssistantMessage(raw),
-      action: undefined,
+      message: createAssistantMessage(decision.message, action ? { actionType: action.type } : undefined),
+      action,
+    };
+  }
+
+  if (mode === "full_agent") {
+    const systemPrompt = buildFullAgentPrompt(taskContext, projectContext, settings.availabilityBlocks, settings.language);
+    const decision = await requestStructuredAI(
+      userMessage,
+      systemPrompt,
+      "full_agent",
+      settings,
+      (value) => validateFullAgentDecision(value, taskContext, projectContext, settings.language, settings.availabilityBlocks)
+    );
+
+    const action = decision.kind === "proposal" ? decision.proposal : undefined;
+    return {
+      message: createAssistantMessage(decision.message, action ? { actionType: action.type } : undefined),
+      action,
     };
   }
 
@@ -891,6 +966,17 @@ function readTaskDraft(value: unknown): AITaskDraft | undefined {
   const scheduleValue = readScheduleValue(value);
   const scheduledAt = normalizeScheduledAt(scheduleValue);
   if (scheduledAt && !isReasonableScheduleDate(scheduledAt)) return undefined;
+
+  let categoryTarget: AICategoryTarget | undefined;
+  if (isRecord(value.categoryTarget)) {
+    const kind = value.categoryTarget.kind;
+    if (kind === "existing" && typeof value.categoryTarget.categoryId === "string") {
+      categoryTarget = { kind: "existing", categoryId: value.categoryTarget.categoryId };
+    } else if (kind === "new" && typeof value.categoryTarget.ref === "string") {
+      categoryTarget = { kind: "new", ref: value.categoryTarget.ref };
+    }
+  }
+
   return {
     title: value.title.trim(),
     description: typeof value.description === "string" ? value.description.trim() : "",
@@ -899,6 +985,7 @@ function readTaskDraft(value: unknown): AITaskDraft | undefined {
     reminderMinutes: readReminderMinutes(value.reminderMinutes),
     repeat: isRecord(value.repeat) ? normalizeRepeat(value.repeat) : { ...defaultRepeat },
     projectName: typeof value.projectName === "string" && value.projectName.trim() ? value.projectName.trim() : undefined,
+    categoryTarget,
     tags: Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string").map((tag) => tag.trim()).filter(Boolean) : [],
   };
 }
@@ -1465,3 +1552,386 @@ function logSchemaValidationError(schema: StructuredSchema, validationError: str
     });
   }
 }
+
+function validateBatchAction(value: unknown, taskContext: Task[], projectContext: Project[]): BatchAction | undefined {
+  if (!isRecord(value) || value.type !== "batch_action") return undefined;
+
+  const categoriesToCreate: AICategoryDraft[] = [];
+  if (Array.isArray(value.categoriesToCreate)) {
+    for (const cat of value.categoriesToCreate) {
+      if (!isRecord(cat) || typeof cat.ref !== "string" || typeof cat.name !== "string") return undefined;
+      const ref = cat.ref.trim();
+      const name = cat.name.trim();
+      if (!ref || !name) return undefined;
+      categoriesToCreate.push({ ref, name });
+    }
+  }
+
+  const categoriesToRename: CategoryRenameDraft[] = [];
+  if (Array.isArray(value.categoriesToRename)) {
+    for (const rename of value.categoriesToRename) {
+      if (!isRecord(rename) || typeof rename.categoryId !== "string" || typeof rename.newName !== "string") return undefined;
+      const categoryId = rename.categoryId.trim();
+      const newName = rename.newName.trim();
+      if (!categoryId || !newName) return undefined;
+      categoriesToRename.push({ categoryId, newName });
+    }
+  }
+
+  const tasksToCreate: AITaskDraft[] = [];
+  if (Array.isArray(value.tasksToCreate)) {
+    for (const draft of value.tasksToCreate) {
+      const parsed = readTaskDraft(draft);
+      if (!parsed) return undefined;
+      tasksToCreate.push(parsed);
+    }
+  }
+
+  const scheduleChanges: ScheduleChangeDraft[] = [];
+  if (Array.isArray(value.scheduleChanges)) {
+    for (const change of value.scheduleChanges) {
+      const parsed = readScheduleChange(change, taskContext, "plan_day");
+      if (!parsed) return undefined;
+      scheduleChanges.push(parsed);
+    }
+  }
+
+  const manageOperations: ManageTaskOperation[] = [];
+  if (Array.isArray(value.manageOperations)) {
+    for (const op of value.manageOperations) {
+      const parsed = readManageTaskOperation(op, taskContext, projectContext);
+      if (!parsed) return undefined;
+      manageOperations.push(parsed);
+    }
+  }
+
+  if (
+    categoriesToCreate.length === 0 &&
+    categoriesToRename.length === 0 &&
+    tasksToCreate.length === 0 &&
+    scheduleChanges.length === 0 &&
+    manageOperations.length === 0
+  ) return undefined;
+
+  return {
+    type: "batch_action",
+    categoriesToCreate: categoriesToCreate.length ? categoriesToCreate : undefined,
+    categoriesToRename: categoriesToRename.length ? categoriesToRename : undefined,
+    tasksToCreate: tasksToCreate.length ? tasksToCreate : undefined,
+    scheduleChanges: scheduleChanges.length ? scheduleChanges : undefined,
+    manageOperations: manageOperations.length ? manageOperations : undefined,
+  };
+}
+
+export function validateFullAgentDecision(
+  value: unknown,
+  taskContext: Task[],
+  projectContext: Project[],
+  language: UserSettings["language"],
+  availabilityBlocks: AvailabilityBlock[],
+): FullAgentDecision | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind;
+  if (kind !== "answer" && kind !== "clarify" && kind !== "proposal") return undefined;
+
+  const message = readUserMessage(value);
+  if (!message || !isTextQualitySafe(message, language)) return undefined;
+
+  if (kind === "answer" || kind === "clarify") {
+    return { kind, message };
+  }
+
+  // kind === "proposal"
+  const proposalSource = isRecord(value.proposal) ? value.proposal : undefined;
+  if (!proposalSource) return undefined;
+
+  const proposal = validateBatchAction(proposalSource, taskContext, projectContext);
+  if (!proposal) return undefined;
+
+  return {
+    kind: "proposal",
+    message,
+    proposal,
+  };
+}
+
+function validateAgentDecision(
+  value: unknown,
+  taskContext: Task[],
+  projectContext: Project[],
+  language: UserSettings["language"],
+  availabilityBlocks: AvailabilityBlock[],
+): AgentDecision | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind;
+  if (kind !== "answer" && kind !== "clarify" && kind !== "proposal") return undefined;
+
+  const message = readUserMessage(value);
+  if (!message || !isTextQualitySafe(message, language)) return undefined;
+
+  if (kind === "answer" || kind === "clarify") {
+    return { kind, message };
+  }
+
+  // kind === "proposal"
+  const actionSource = isRecord(value.action) ? value.action : undefined;
+  if (!actionSource) return undefined;
+
+  let action: AssistantAction | undefined;
+  if (actionSource.type === "create_tasks") {
+    const validated = validateCreateTasksAction(value);
+    action = validated?.action;
+  } else if (actionSource.type === "schedule_tasks") {
+    const validated = validatePlanDayResult(value, taskContext, availabilityBlocks, actionSource.mode === "replan_tasks" ? "replan_tasks" : "plan_day", language);
+    action = validated?.action;
+  } else if (actionSource.type === "manage_tasks") {
+    const validated = validateManageTasksResult(value, taskContext, projectContext, language);
+    action = validated?.action;
+  } else if (actionSource.type === "batch_action") {
+    action = validateBatchAction(actionSource, taskContext, projectContext);
+  }
+
+  if (!action) return undefined;
+
+  return {
+    kind: "proposal",
+    message,
+    action,
+  };
+}
+
+export function getCleanLocalizedErrorMessage(error: unknown, language: UserSettings["language"]): string {
+  const isRu = language === "ru";
+  if (error instanceof AIProviderError) {
+    if (error.code === "openrouter_missing_key") {
+      return isRu ? "Нужно настроить OpenRouter в настройках Aevum." : "OpenRouter setup is required in Aevum Settings.";
+    }
+    if (error.code === "ollama_not_running" || error.code === "wrong_base_url") {
+      return isRu ? "Ollama недоступен. Запустите Ollama на этом компьютере и попробуйте снова." : "Ollama is unavailable. Start Ollama on this computer and try again.";
+    }
+    if (error.code === "model_missing") {
+      return isRu ? "Выбранная модель Ollama не установлена." : "The selected Ollama model is not installed.";
+    }
+    if (error.code === "invalid_ai_response") {
+      return isRu
+        ? "Ответ модели выглядел некорректно. Попробуйте еще раз или выберите другую AI-модель в настройках."
+        : "The model response looked unusable. Try again or choose another AI model in settings.";
+    }
+  }
+  return isRu
+    ? "Не удалось безопасно обработать запрос. Попробуйте еще раз."
+    : "I could not handle that safely. Please try again.";
+}
+
+function buildAutoAgentPrompt(
+  taskContext: Task[],
+  projectContext: Project[],
+  availabilityBlocks: AvailabilityBlock[],
+  language: UserSettings["language"]
+) {
+  const projectSummary = projectContext
+    .slice(0, 30)
+    .map((project) => `- id=${project.id} | ${project.name}`)
+    .join("\n");
+
+  const taskSummary = taskContext
+    .slice(0, 50)
+    .map((task) => `- id=${task.id} | title=${task.title} | status=${task.status} | projectId=${task.projectId} | scheduledAt=${task.scheduledAt ?? "none"} | duration=${task.durationMinutes ?? "none"} | eligible=${isEligibleForPlan(task, "plan_day") ? "yes" : "no"}`)
+    .join("\n");
+
+  const availabilitySummary = availabilityBlocks
+    .map((block) => `- ${block.label}: weekdays=${block.weekdays.join(",")} ${block.startTime}-${block.endTime}`)
+    .join("\n");
+
+  const today = getTodayISO();
+
+  const langBlock = language === "ru"
+    ? `Отвечай строго на русском языке. Все пользовательские строки внутри JSON должны быть на русском.`
+    : `Respond strictly in English. All user-facing strings inside JSON must be in English.`;
+
+  return `You are Aevum, a premium unified task-management autonomous agent.
+Current date: ${today}.
+${langBlock}
+
+You must analyze the user's natural language request and decide on the best course of action. Return a JSON object matching this schema:
+{
+  "kind": "answer" | "clarify" | "proposal",
+  "message": "A short, natural response to the user. For answer/clarify, this is the main response. For proposals, this is a short natural acknowledgment containing any assumptions made (e.g., date, time, duration).",
+  "action": null | AssistantAction
+}
+
+Rules for deciding the "kind":
+1. "answer": Use for read-only queries (e.g., "Что у меня сегодня?", "What tasks do I have today?", "What is Aevum?"), general greetings, or questions about features. Return a concise, useful answer directly in the "message" field. Set "action" to null.
+2. "clarify": Use when the request is too ambiguous, missing critical information, unsafe, or cannot be planned. Ask for clarification in the "message" field. Set "action" to null.
+3. "proposal": Use when the user requests mutating actions (create, plan, reschedule, edit, delete, etc.). Prepare a valid proposal in the "action" field and a short acknowledgement in "message".
+
+Rules for "action" schemas:
+- If creating new tasks (including compound planning where tasks are new):
+  {
+    "type": "create_tasks",
+    "tasks": [
+      {
+        "title": "Gym",
+        "scheduledAt": "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD" or null,
+        "durationMinutes": number or null,
+        "projectName": "Personal" or similar (optional),
+        "tags": []
+      }
+    ]
+  }
+  * For compound planning (e.g., "спланируй завтра сходить на тренировку, в кино"): create these as new tasks with realistic schedule times/durations. Make clear, reasonable assumptions for time/duration in your "message" (e.g. gym at 10:00 for 90 min, cinema at 14:00 for 120 min) and set scheduledAt and durationMinutes in the action. Ensure no overlaps with existing tasks or unavailable blocks.
+
+- If planning/scheduling existing active tasks (only those listed as eligible):
+  {
+    "type": "schedule_tasks",
+    "mode": "plan_day",
+    "changes": [
+      { "taskId": "existing-task-id", "scheduledAt": "YYYY-MM-DDTHH:mm", "durationMinutes": number }
+    ]
+  }
+
+- If managing existing tasks (rename, edit, status complete/active, delete):
+  {
+    "type": "manage_tasks",
+    "operations": [
+      {
+        "operation": "update" | "set_status" | "delete",
+        "taskId": "existing-task-id",
+        "changes": { ... } (only for update),
+        "status": "completed" | "active" (only for set_status),
+        "reason": "Brief reason"
+      }
+    ]
+  }
+
+- If compound/batch operations (e.g., mixed create + schedule/update/delete):
+  {
+    "type": "batch_action",
+    "tasksToCreate": [ ...tasks to create schema above... ],
+    "scheduleChanges": [ ...schedule changes schema above... ],
+    "manageOperations": [ ...manage operations schema above... ]
+  }
+  Use this for mixed requests (e.g. "Create a cinema task and move my workout to 18:00", "Delete shopping and schedule a new visit").
+
+Safety Boundary constraints:
+- NEVER modify or propose changes to: API keys, Telegram tokens, model/provider settings, cache/history clearing, system settings, or onboarding state. If the user asks for these, choose "clarify" or "answer" stating that these settings cannot be changed by the agent.
+- Do not invent task IDs. Use only task IDs listed below.
+- Do not claim changes were saved. The app applies changes only after confirmation.
+
+Current tasks:
+${taskSummary || "No tasks yet."}
+
+Existing projects/categories:
+${projectSummary || "No projects yet."}
+
+Unavailable blocks:
+${availabilitySummary || "No unavailable blocks."}`;
+}
+
+function buildFullAgentPrompt(
+  taskContext: Task[],
+  projectContext: Project[],
+  availabilityBlocks: AvailabilityBlock[],
+  language: UserSettings["language"]
+) {
+  const projectSummary = projectContext
+    .slice(0, 30)
+    .map((project) => `- id=${project.id} | ${project.name}`)
+    .join("\n");
+
+  const activeTasks = taskContext.filter((t) => t.status === "active").slice(0, 50);
+  const completedTasks = taskContext.filter((t) => t.status === "completed").slice(0, 20);
+
+  const taskSummary = activeTasks
+    .map((task) => `- id=${task.id} | title=${task.title} | status=active | projectId=${task.projectId} | scheduledAt=${task.scheduledAt ?? "none"} | duration=${task.durationMinutes ?? "none"} | reminder=${task.reminderMinutes ?? "none"}`)
+    .join("\n");
+
+  const completedSummary = completedTasks
+    .map((task) => `- id=${task.id} | title=${task.title} | status=completed | projectId=${task.projectId}`)
+    .join("\n");
+
+  const availabilitySummary = availabilityBlocks
+    .map((block) => `- ${block.label}: weekdays=${block.weekdays.join(",")} ${block.startTime}-${block.endTime}`)
+    .join("\n");
+
+  const today = getTodayISO();
+
+  const langBlock = language === "ru"
+    ? `Отвечай строго на русском языке. Все пользовательские строки внутри JSON должны быть на русском.`
+    : `Respond strictly in English. All user-facing strings inside JSON must be in English.`;
+
+  return `You are Aevum, a premium unified task-management autonomous agent.
+Current date: ${today}.
+${langBlock}
+
+You must analyze the user's natural language request and decide on the best course of action. Return a JSON object matching this schema:
+{
+  "kind": "answer" | "clarify" | "proposal",
+  "message": "A short, natural response to the user. For answer/clarify, this is the main response. For proposals, this is a short natural acknowledgment containing any assumptions made (e.g., date, time, duration, categories).",
+  "proposal": null | BatchAction
+}
+
+Where BatchAction has the following schema:
+{
+  "type": "batch_action",
+  "categoriesToCreate": [
+    { "ref": "temp-ref-1", "name": "Category Name" }
+  ],
+  "categoriesToRename": [
+    { "categoryId": "existing-category-id", "newName": "New Category Name" }
+  ],
+  "tasksToCreate": [
+    {
+      "title": "Gym",
+      "scheduledAt": "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD" or null,
+      "durationMinutes": number or null,
+      "reminderMinutes": 0 | 5 | 10 | 30 | 60 | null,
+      "categoryTarget": { "kind": "new", "ref": "temp-ref-1" } or { "kind": "existing", "categoryId": "existing-category-id" }
+    }
+  ],
+  "scheduleChanges": [
+    { "taskId": "existing-task-id", "scheduledAt": "YYYY-MM-DDTHH:mm", "durationMinutes": number }
+  ],
+  "manageOperations": [
+    {
+      "operation": "update" | "set_status" | "delete",
+      "taskId": "existing-task-id",
+      "changes": {
+        "title": "New Title",
+        "description": "New Description",
+        "projectId": "existing-category-id"
+      },
+      "status": "completed" | "active",
+      "reason": "Brief reason"
+    }
+  ]
+}
+
+Rules for deciding the "kind":
+1. "answer": Use for read-only queries (e.g. asking about tasks, workload, upcoming work, or general questions). Set "proposal" to null.
+2. "clarify": Use when the request is too ambiguous, missing critical information, unsafe, or cannot be planned. Set "proposal" to null.
+3. "proposal": Use when the user requests mutating actions. Prepare a valid BatchAction in the "proposal" field and a short acknowledgement in "message".
+
+Rules and Capabilities:
+- Every mutating proposal must normalize into a single batch_action proposal. Do not use other types. Even a simple task creation must use batch_action with tasksToCreate.
+- Duplicates: Do not create duplicate categories. Check existing categories below. If the user asks to assign a task to a category, reuse the existing category ID or matching name case-insensitively.
+- Link Category: If creating new tasks under a category created in the same proposal, use a temporary "ref" (e.g. "temp-ref-1") in categoriesToCreate and reference it with { "kind": "new", "ref": "temp-ref-1" } in tasksToCreate.categoryTarget.
+- Rename Category: You may rename existing categories using categoriesToRename (specifying categoryId and newName). Never rename the category with ID "uncategorized" (this is the special Uncategorized fallback category).
+- Defer deletion: We do not support category deletion. If requested, use "clarify" or "answer" stating category deletion is not supported.
+- Recurrence and Subtasks: We do not support recurrence/repeat rules mutation or subtask creation/mutation in this mode. If requested, use "clarify" or "answer" stating they are not supported.
+- Assumptions: If the user leaves out time or duration for a task, make reasonable assumptions (e.g. gym at 10:00 for 60 min, cinema for 120 min) and state these assumptions clearly in your "message" in the selected language. Propose these actions rather than pretending they were already performed.
+- Forbid setting alterations: NEVER modify or propose changes to settings, API keys, Telegram bot tokens, app theme, appearance, or onboarding. If requested, refuse.
+
+Current active tasks:
+${taskSummary || "No active tasks."}
+
+Recently completed tasks:
+${completedSummary || "No completed tasks."}
+
+Existing categories:
+${projectSummary || "No categories yet."}
+
+Unavailable blocks:
+${availabilitySummary || "No unavailable blocks."}`;
+}
+

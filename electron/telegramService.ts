@@ -7,6 +7,7 @@ export type TelegramBridgeStatus =
   | "disabled"
   | "connecting"
   | "connected"
+  | "reconnecting"
   | "invalid-token"
   | "not-paired"
   | "webhook-conflict"
@@ -56,6 +57,7 @@ interface TelegramStoredState {
     username?: string;
     firstName?: string;
   };
+  liveUiMessageId?: number;
 }
 
 interface TelegramMessageRequest {
@@ -117,6 +119,7 @@ export class TelegramBridge {
   private pairingExpiresAt = 0;
   private pollAbort: AbortController | null = null;
   private isPolling = false;
+  private sessionGeneration = 0;
   private rendererReady = false;
   private queuedRendererRequests: RendererRequest[] = [];
   private pendingRendererResponses = new Map<string, (value: RendererResponse) => void>();
@@ -127,14 +130,16 @@ export class TelegramBridge {
 
   async setSettings(settings: Partial<TelegramBridgeSettings>) {
     this.settings = { ...this.settings, ...settings };
-    if (!this.settings.enabled) {
-      this.stopPolling();
-      this.status = "disabled";
-      this.broadcastStatus();
-      return this.getStatusAsync();
+    if (settings.enabled !== undefined) {
+      if (!this.settings.enabled) {
+        this.stopPolling();
+        this.status = "disabled";
+        this.broadcastStatus();
+        return this.getStatusAsync();
+      } else {
+        await this.ensurePolling();
+      }
     }
-
-    await this.ensurePolling();
     return this.getStatusAsync();
   }
 
@@ -143,6 +148,8 @@ export class TelegramBridge {
     this.status = "connecting";
     this.statusMessage = "";
     this.broadcastStatus();
+
+    this.stopPolling();
 
     if (!isTelegramToken(token)) {
       this.status = "invalid-token";
@@ -168,6 +175,7 @@ export class TelegramBridge {
     this.state.pairedChat = undefined;
     this.state.interactionMode = "template";
     this.state.offset = 0;
+    this.state.liveUiMessageId = undefined;
     this.saveState();
     this.ensurePairingCode();
     await this.ensurePolling();
@@ -189,16 +197,24 @@ export class TelegramBridge {
   }
 
   async unpair() {
+    this.stopPolling();
     this.state.pairedChat = undefined;
     this.state.interactionMode = "template";
+    this.state.liveUiMessageId = undefined;
     this.ensurePairingCode(true);
     this.saveState();
-    if (this.settings.enabled && await this.hasToken()) this.status = "not-paired";
+    if (this.settings.enabled && await this.hasToken()) {
+      this.status = "not-paired";
+      await this.ensurePolling();
+    } else {
+      this.status = "disabled";
+    }
     this.broadcastStatus();
     return { ok: true, ...(await this.getStatusAsync()) };
   }
 
   async reconnectPolling() {
+    this.stopPolling();
     const result = await this.telegramRequest("deleteWebhook", { drop_pending_updates: false });
     if (!result.ok) {
       this.status = "error";
@@ -289,27 +305,55 @@ export class TelegramBridge {
   private async pollLoop() {
     if (this.isPolling) return;
     this.isPolling = true;
-    this.pollAbort = new AbortController();
 
-    while (this.settings.enabled && this.pollAbort && !this.pollAbort.signal.aborted) {
+    this.sessionGeneration += 1;
+    const currentGeneration = this.sessionGeneration;
+    const abortController = new AbortController();
+    this.pollAbort = abortController;
+    const signal = abortController.signal;
+
+    const sessionStartTime = Math.floor(Date.now() / 1000);
+
+    while (this.settings.enabled && this.sessionGeneration === currentGeneration && !signal.aborted) {
       try {
         const response = await this.telegramRequest("getUpdates", {
           offset: this.state.offset || undefined,
           timeout: 25,
           allowed_updates: ["message", "callback_query"],
-        }, this.pollAbort.signal);
+        }, signal);
+
+        if (signal.aborted || this.sessionGeneration !== currentGeneration) break;
 
         if (!response.ok) {
-          this.status = response.error_code === 409 ? "webhook-conflict" : "error";
+          if (signal.aborted || this.sessionGeneration !== currentGeneration) break;
+          
+          this.status = response.error_code === 409 ? "webhook-conflict" : "reconnecting";
           this.statusMessage = readTelegramDescription(response) || "Telegram polling failed.";
           this.broadcastStatus();
-          await delay(3000);
+
+          try {
+            await delayWithSignal(3000, signal);
+          } catch {
+            break;
+          }
           continue;
+        }
+
+        if (this.status === "reconnecting" || this.status === "error") {
+          this.status = this.state.pairedChat ? "connected" : "not-paired";
+          this.statusMessage = "";
+          this.broadcastStatus();
         }
 
         if (Array.isArray(response.result)) {
           for (const update of response.result) {
-            await this.handleUpdate(update);
+            if (signal.aborted || this.sessionGeneration !== currentGeneration) break;
+
+            const isBacklog = checkIfBacklog(update, sessionStartTime);
+            if (!isBacklog) {
+              await this.handleUpdate(update);
+            }
+
             const updateId = isRecord(update) && typeof update.update_id === "number" ? update.update_id : null;
             if (updateId !== null) {
               this.state.offset = Math.max(this.state.offset, updateId + 1);
@@ -318,15 +362,26 @@ export class TelegramBridge {
           }
         }
       } catch (error) {
-        if (this.pollAbort?.signal.aborted) break;
-        this.status = "error";
+        if (signal.aborted || this.sessionGeneration !== currentGeneration) break;
+        
+        this.status = "reconnecting";
         this.statusMessage = error instanceof Error ? sanitizeMessage(error.message) : "Telegram polling failed.";
         this.broadcastStatus();
-        await delay(3000);
+
+        try {
+          await delayWithSignal(3000, signal);
+        } catch {
+          break;
+        }
       }
     }
 
-    this.isPolling = false;
+    if (this.pollAbort === abortController) {
+      this.pollAbort = null;
+    }
+    if (this.sessionGeneration === currentGeneration) {
+      this.isPolling = false;
+    }
   }
 
   private async handleUpdate(update: unknown) {
@@ -341,6 +396,7 @@ export class TelegramBridge {
   }
 
   private async handleMessage(message: Record<string, unknown>) {
+    if (!this.settings.enabled) return;
     if (!isRecord(message.chat) || message.chat.type !== "private" || typeof message.chat.id !== "number") return;
     if (typeof message.text !== "string" || typeof message.message_id !== "number") return;
     const chatId = message.chat.id;
@@ -359,9 +415,16 @@ export class TelegramBridge {
         this.pairingCode = "";
         this.pairingExpiresAt = 0;
         this.status = "connected";
+        this.state.liveUiMessageId = undefined;
         this.saveState();
         this.broadcastStatus();
-        await this.sendMessage(chatId, this.copy("telegram.reply.paired"), this.templateMenuMarkup());
+
+        const menuMarkup = this.templateMenuMarkup();
+        const sentMsg = await this.sendMessage(chatId, this.copy("telegram.reply.paired"), menuMarkup);
+        if (sentMsg && typeof sentMsg.message_id === "number") {
+          this.state.liveUiMessageId = sentMsg.message_id;
+          this.saveState();
+        }
       } else {
         await this.sendMessage(chatId, this.copy("telegram.reply.pairRequired"));
       }
@@ -373,6 +436,20 @@ export class TelegramBridge {
       return;
     }
 
+    const isAiRequest = this.currentInteractionMode() === "ai" &&
+      text !== "/start" && text !== "/menu" && text !== "menu" && text !== "меню";
+
+    let thinkingMessageId: number | undefined;
+    if (isAiRequest) {
+      void this.telegramRequest("sendChatAction", { chat_id: chatId, action: "typing" });
+
+      const thinkingText = this.copy("telegram.thinking");
+      const sentMsg = await this.sendMessage(chatId, thinkingText);
+      if (sentMsg && typeof sentMsg.message_id === "number") {
+        thinkingMessageId = sentMsg.message_id;
+      }
+    }
+
     const request: TelegramMessageRequest = {
       id: createRequestId(),
       chatId,
@@ -380,8 +457,24 @@ export class TelegramBridge {
       text,
       interactionMode: this.currentInteractionMode(),
     };
-    const response = await this.requestRenderer({ type: "message", payload: request });
-    await this.deliverRendererResponse(chatId, response);
+    try {
+      const response = await this.requestRenderer({ type: "message", payload: request });
+      
+      // Safety guard: if bot was disabled or unpaired during rendering, abort and delete thinking message
+      if (!this.settings.enabled || !this.state.pairedChat || this.state.pairedChat.id !== chatId) {
+        if (thinkingMessageId) {
+          await this.deleteMessage(chatId, thinkingMessageId);
+        }
+        return;
+      }
+
+      await this.deliverRendererResponse(chatId, response, thinkingMessageId);
+    } catch (error) {
+      if (thinkingMessageId) {
+        const errText = error instanceof Error ? error.message : "Error";
+        await this.editMessageText(chatId, thinkingMessageId, errText);
+      }
+    }
   }
 
   private async handleCallbackQuery(query: Record<string, unknown>) {
@@ -391,36 +484,138 @@ export class TelegramBridge {
     const chatId = chat && typeof chat.id === "number" ? chat.id : null;
 
     if (!callbackId || !chatId) return;
-    if (!this.state.pairedChat || this.state.pairedChat.id !== chatId) {
-      await this.answerCallback(callbackId, this.copy("telegram.reply.unauthorized"));
+    if (!this.settings.enabled) {
+      await this.answerCallback(callbackId, "Disabled");
       return;
     }
 
-    const decisionMatch = /^tg:(confirm|cancel):([A-Za-z0-9_-]{8,80})$/.exec(data);
-    if (decisionMatch) {
-      await this.answerCallback(callbackId, decisionMatch[1] === "confirm" ? this.copy("telegram.callback.confirming") : this.copy("telegram.callback.canceling"));
-      await this.editReplyMarkup(query.message, undefined);
+    let answered = false;
+    const answer = async (text: string) => {
+      if (answered) return;
+      answered = true;
+      await this.answerCallback(callbackId, text);
+    };
 
-      const response = await this.requestRenderer({
-        type: "decision",
-        payload: {
-          id: createRequestId(),
-          proposalId: decisionMatch[2],
-          decision: decisionMatch[1] === "confirm" ? "confirm" : "cancel",
-          chatId,
-        },
-      });
-      await this.deliverRendererResponse(chatId, response);
-      return;
-    }
+    try {
+      if (!this.state.pairedChat || this.state.pairedChat.id !== chatId) {
+        await answer(this.copy("telegram.reply.unauthorized"));
+        return;
+      }
 
-    const modeMatch = /^tg:mode:(template|ai)$/.exec(data);
-    if (modeMatch) {
-      this.state.interactionMode = modeMatch[1] === "ai" ? "ai" : "template";
-      this.saveState();
-      this.broadcastStatus();
-      await this.answerCallback(callbackId, this.copy(modeMatch[1] === "ai" ? "telegram.callback.aiMode" : "telegram.callback.templateMode"));
-      await this.editReplyMarkup(query.message, undefined);
+      // Mode checking guard to prevent old mode-menu buttons from corrupting the current mode
+      const isAiMode = this.currentInteractionMode() === "ai";
+      const isTemplateButton = data === "tg:today" || data === "tg:upcoming" || data === "tg:create" || data.startsWith("tg:create:");
+      const isAiButton = data === "tg:ai:help" || data.startsWith("tg:ai:");
+      
+      if (isAiMode && isTemplateButton) {
+        await answer(this.copy("telegram.error.wrongMode"));
+        await this.editReplyMarkup(query.message, undefined);
+        return;
+      }
+      if (!isAiMode && isAiButton) {
+        await answer(this.copy("telegram.error.wrongMode"));
+        await this.editReplyMarkup(query.message, undefined);
+        return;
+      }
+
+      const decisionMatch = /^tg:(confirm|cancel):([A-Za-z0-9_-]{8,80})$/.exec(data);
+      if (decisionMatch) {
+        const decision = decisionMatch[1];
+        const proposalId = decisionMatch[2];
+        await answer(decision === "confirm" ? this.copy("telegram.callback.confirming") : this.copy("telegram.callback.canceling"));
+        
+        // Remove buttons immediately to prevent double-tap
+        await this.editReplyMarkup(query.message, undefined);
+
+        // Request renderer to apply or cancel
+        const response = await this.requestRenderer({
+          type: "decision",
+          payload: {
+            id: createRequestId(),
+            proposalId,
+            decision: decision === "confirm" ? "confirm" : "cancel",
+            chatId,
+          },
+        });
+
+        // Edit the original preview message to show final state
+        if (isRecord(query.message) && typeof query.message.message_id === "number" && typeof query.message.text === "string") {
+          const originalText = query.message.text;
+          const cleanText = originalText
+            .replace(/\nНичего не будет создано без подтверждения\..*/g, "")
+            .replace(/\nNothing will be created without confirmation\..*/g, "")
+            .replace(/\nПрименить это расписание\?.*/g, "")
+            .replace(/\nApply this schedule\?.*/g, "")
+            .replace(/\nУдаления необратимы\. Применить\?.*/g, "")
+            .replace(/\nDeletes are permanent\. Apply\?.*/g, "");
+
+          let statusIndicator = "";
+          if (decision === "cancel") {
+            statusIndicator = this.settings.language === "ru" ? "\n\n❌ Отменено" : "\n\n❌ Cancelled";
+          } else if (response.ok) {
+            statusIndicator = this.settings.language === "ru" ? "\n\n✅ Подтверждено" : "\n\n✅ Confirmed";
+          } else if (response.text.includes("expired") || response.text.includes("истекл")) {
+            statusIndicator = this.settings.language === "ru" ? "\n\n⚠️ Истекло" : "\n\n⚠️ Expired";
+          } else {
+            statusIndicator = this.settings.language === "ru" ? "\n\n⚠️ Ошибка применимости" : "\n\n⚠️ Failed to apply";
+          }
+          await this.editMessageText(chatId, query.message.message_id, cleanText + statusIndicator);
+        }
+
+        // Send the feedback message (cancellation or success summary)
+        await this.deliverRendererResponse(chatId, response);
+
+        // In Template Mode, return the user to the main menu
+        if (this.currentInteractionMode() === "template") {
+          const menuResponse = await this.requestRenderer({
+            type: "callback",
+            payload: {
+              id: createRequestId(),
+              chatId,
+              data: "tg:menu",
+              interactionMode: "template",
+            },
+          });
+          await this.deliverRendererResponse(chatId, menuResponse);
+        }
+        return;
+      }
+
+      const modeMatch = /^tg:mode:(template|ai)$/.exec(data);
+      if (modeMatch) {
+        this.state.interactionMode = modeMatch[1] === "ai" ? "ai" : "template";
+        if (isRecord(query.message) && typeof query.message.message_id === "number") {
+          this.state.liveUiMessageId = query.message.message_id;
+        }
+        this.saveState();
+        this.broadcastStatus();
+        await answer(this.copy(modeMatch[1] === "ai" ? "telegram.callback.aiMode" : "telegram.callback.templateMode"));
+
+        const response = await this.requestRenderer({
+          type: "callback",
+          payload: {
+            id: createRequestId(),
+            chatId,
+            data,
+            interactionMode: this.currentInteractionMode(),
+          },
+        });
+        await this.deliverRendererResponse(chatId, response);
+        return;
+      }
+
+      if (!isSafeTelegramCallbackData(data)) {
+        await answer(this.copy("telegram.error.expired"));
+        return;
+      }
+
+      await answer(this.copy("telegram.callback.opening"));
+      
+      if (isRecord(query.message) && typeof query.message.message_id === "number") {
+        this.state.liveUiMessageId = query.message.message_id;
+        this.saveState();
+      }
+
       const response = await this.requestRenderer({
         type: "callback",
         payload: {
@@ -431,48 +626,99 @@ export class TelegramBridge {
         },
       });
       await this.deliverRendererResponse(chatId, response);
-      return;
+    } catch (error) {
+      console.error("[TelegramBridge] Callback handling failed:", error);
+      await answer(this.copy("telegram.error.expired"));
     }
-
-    if (!isSafeTelegramCallbackData(data)) {
-      await this.answerCallback(callbackId, this.copy("telegram.error.expired"));
-      return;
-    }
-
-    await this.answerCallback(callbackId, this.copy("telegram.callback.opening"));
-    await this.editReplyMarkup(query.message, undefined);
-    const response = await this.requestRenderer({
-      type: "callback",
-      payload: {
-        id: createRequestId(),
-        chatId,
-        data,
-        interactionMode: this.currentInteractionMode(),
-      },
-    });
-    await this.deliverRendererResponse(chatId, response);
   }
 
-  private async deliverRendererResponse(chatId: number, response: RendererResponse) {
+  private async deliverRendererResponse(chatId: number, response: RendererResponse, editMessageId?: number) {
+    const text = sanitizeTelegramText(response.text);
+
+    // 1. Classification check
+    // - final_result, security_error, pairing_confirmation (ok === false or kind === "message")
     if (!response.ok || response.kind === "message") {
-      await this.sendMessage(chatId, sanitizeTelegramText(response.text));
+      if (editMessageId) {
+        const edited = await this.editMessageText(chatId, editMessageId, text);
+        if (edited) return;
+      }
+      await this.sendMessage(chatId, text);
       return;
     }
+
+    // - transient menus/wizard/status (kind === "buttons")
     if (response.kind === "buttons") {
-      await this.sendMessage(chatId, sanitizeTelegramText(response.text), {
+      const replyMarkup = {
         inline_keyboard: response.buttons.map((row) => row.map((button) => ({
           text: sanitizeTelegramText(button.text).slice(0, 64),
           callback_data: button.callbackData,
         }))),
-      });
+      };
+
+      if (editMessageId) {
+        const edited = await this.editMessageText(chatId, editMessageId, text, replyMarkup);
+        if (edited) return;
+      }
+
+      await this.sendOrEditLiveUiMessage(chatId, text, replyMarkup);
       return;
     }
-    await this.sendMessage(chatId, sanitizeTelegramText(response.text), {
+
+    // - pending_action_preview (kind === "proposal")
+    const replyMarkup = {
       inline_keyboard: [[
         { text: this.copy("telegram.button.confirm"), callback_data: `tg:confirm:${response.proposalId}` },
         { text: this.copy("telegram.button.cancel"), callback_data: `tg:cancel:${response.proposalId}` },
       ]],
-    });
+    };
+
+    if (editMessageId) {
+      const edited = await this.editMessageText(chatId, editMessageId, text, replyMarkup);
+      if (edited) return;
+    }
+
+    await this.sendMessage(chatId, text, replyMarkup);
+  }
+
+  private async sendOrEditLiveUiMessage(chatId: number, text: string, replyMarkup?: unknown) {
+    if (this.state.liveUiMessageId) {
+      const success = await this.editMessageText(chatId, this.state.liveUiMessageId, text, replyMarkup);
+      if (success) {
+        return;
+      }
+    }
+    const msg = await this.sendMessage(chatId, text, replyMarkup);
+    if (msg && typeof msg.message_id === "number") {
+      this.state.liveUiMessageId = msg.message_id;
+      this.saveState();
+    }
+  }
+
+  private async editMessageText(chatId: number, messageId: number, text: string, replyMarkup?: unknown): Promise<boolean> {
+    try {
+      const res = await this.telegramRequest("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: sanitizeTelegramText(text),
+        reply_markup: replyMarkup ?? { inline_keyboard: [] },
+        disable_web_page_preview: true,
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private async deleteMessage(chatId: number, messageId: number): Promise<boolean> {
+    try {
+      const res = await this.telegramRequest("deleteMessage", {
+        chat_id: chatId,
+        message_id: messageId,
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   private async requestRenderer(request: RendererRequest): Promise<RendererResponse> {
@@ -502,13 +748,14 @@ export class TelegramBridge {
     this.broadcast(channel, request.payload);
   }
 
-  private async sendMessage(chatId: number, text: string, replyMarkup?: unknown) {
-    await this.telegramRequest("sendMessage", {
+  private async sendMessage(chatId: number, text: string, replyMarkup?: unknown): Promise<any> {
+    const res = await this.telegramRequest("sendMessage", {
       chat_id: chatId,
       text: sanitizeTelegramText(text),
       reply_markup: replyMarkup,
       disable_web_page_preview: true,
     });
+    return res.ok ? res.result : null;
   }
 
   private async answerCallback(callbackQueryId: string, text: string) {
@@ -531,6 +778,7 @@ export class TelegramBridge {
   private stopPolling() {
     this.pollAbort?.abort();
     this.pollAbort = null;
+    this.isPolling = false;
   }
 
   private currentInteractionMode(): TelegramInteractionMode {
@@ -595,6 +843,7 @@ export class TelegramBridge {
         interactionMode: parsed.interactionMode === "ai" ? "ai" : "template",
         pairedChat: readStoredChat(parsed.pairedChat),
         bot: readStoredBot(parsed.bot),
+        liveUiMessageId: typeof parsed.liveUiMessageId === "number" ? parsed.liveUiMessageId : undefined,
       };
     } catch {
       return { offset: 0 };
@@ -638,6 +887,8 @@ export class TelegramBridge {
       "telegram.error.expired": ["This confirmation has expired.", "Это подтверждение истекло."],
       "telegram.error.rendererUnavailable": ["Aevum is still starting. Try again in a moment.", "Aevum еще запускается. Попробуйте через несколько секунд."],
       "telegram.error.rendererTimeout": ["Aevum did not answer in time. Try again.", "Aevum не ответил вовремя. Попробуйте снова."],
+      "telegram.error.wrongMode": ["This button belongs to a different mode.", "Эта кнопка относится к другому режиму."],
+      "telegram.thinking": ["🔎 Thinking...", "🔎 Думаю..."],
     };
     return messages[key]?.[ru ? 1 : 0] ?? key;
   }
@@ -735,4 +986,34 @@ function delay(ms: number) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function delayWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new DOMException("Aborted", "AbortError"));
+    }
+    const timeout = setTimeout(() => {
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timeout);
+      reject(new DOMException("Aborted", "AbortError"));
+    }
+    if (signal) {
+      signal.addEventListener("abort", onAbort);
+    }
+  });
+}
+
+function checkIfBacklog(update: unknown, sessionStartTime: number): boolean {
+  if (!isRecord(update)) return true;
+  if (isRecord(update.message)) {
+    const date = typeof update.message.date === "number" ? update.message.date : 0;
+    return date < sessionStartTime;
+  }
+  return false;
 }
